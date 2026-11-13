@@ -17,8 +17,15 @@ import gradio as gr
 # On the Space, splat_studio is uploaded next to this file; locally use src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from splat_studio.space.jobs import HubStore, JobManager, LocalStore, format_elapsed  # noqa: E402
+from splat_studio.space.jobs import (  # noqa: E402
+    HubStore,
+    Job,
+    JobManager,
+    LocalStore,
+    format_elapsed,
+)
 from splat_studio.space.validation import HELP, UploadError, validate_upload  # noqa: E402
+from splat_studio.space.viewer import scene_html  # noqa: E402
 
 DATASET = os.environ.get("SPLAT_STUDIO_DATASET")
 STORE = HubStore(DATASET, os.environ.get("HF_TOKEN")) if DATASET else LocalStore(Path("local_data"))
@@ -42,10 +49,10 @@ def on_upload(files: list[str] | None):
     return gr.update(value=f"**Ready.** {upload.summary}"), gr.update(interactive=True)
 
 
-def jobs_table() -> list[list[str]]:
+def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
     now = JOBS.clock()
     rows = []
-    for j in JOBS.list():
+    for j in JOBS.list() if jobs is None else jobs:
         if j.status == "failed" and j.error:
             details = f"{j.error.get('message', '')} {j.error.get('tip', '')}".strip()
         elif j.status == "done":
@@ -57,6 +64,23 @@ def jobs_table() -> list[list[str]]:
              format_elapsed(j.elapsed(now)), details]
         )  # fmt: skip
     return rows
+
+
+def scene_choices(jobs: list[Job]) -> list[tuple[str, str]]:
+    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in jobs if j.status == "done"]
+
+
+def refresh_all(current: str | None):
+    """Jobs table and scene picker from one listing (each listing reads the Hub)."""
+    jobs = JOBS.list()
+    choices = scene_choices(jobs)
+    value = current if current in {v for _, v in choices} else None
+    return jobs_table(jobs), gr.update(choices=choices, value=value)
+
+
+def on_pick_scene(job_id: str | None) -> str:
+    job = JOBS.get(job_id) if job_id else None
+    return scene_html(STORE, job.scene_path if job and job.status == "done" else None)
 
 
 def on_create(files: list[str] | None):
@@ -83,15 +107,23 @@ def build() -> gr.Blocks:
         message = gr.Markdown(HELP)
         create = gr.Button("Create scene", variant="primary", interactive=False)
         gr.Markdown("## Jobs")
-        table = gr.Dataframe(headers=COLUMNS, value=jobs_table, interactive=False, wrap=True)
+        table = gr.Dataframe(headers=COLUMNS, interactive=False, wrap=True)
         refresh = gr.Button("Refresh")
+
+        gr.Markdown("## Scene")
+        picker = gr.Dropdown(label="Finished scene", choices=[], value=None)
+        viewer = gr.HTML(scene_html(STORE, None))
 
         files.change(on_upload, files, [message, create])
         create.click(on_create, files, [message, table])
-        refresh.click(jobs_table, None, table)
-        gr.Timer(10).tick(jobs_table, None, table)
+        refresh.click(refresh_all, picker, [table, picker])
+        gr.Timer(10).tick(refresh_all, picker, [table, picker])
+        demo.load(refresh_all, picker, [table, picker])
+        picker.input(on_pick_scene, picker, viewer)
     return demo
 
 
 if __name__ == "__main__":
-    build().launch()
+    # Scene files are served from the store's download folder to the viewer.
+    STORE.file_dir.mkdir(parents=True, exist_ok=True)
+    build().launch(allowed_paths=[str(STORE.file_dir.resolve())])

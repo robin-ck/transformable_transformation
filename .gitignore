@@ -31,3 +31,4 @@ outputs/
 
 # Local Space data (UI dev without HF Hub)
 local_data/
+scene_cache/

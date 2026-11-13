@@ -28,7 +28,15 @@
   - `splat_studio/space/jobs.py`: job state in `jobs/<id>/job.json`, queued/running from the
     worker's `run.json`, Modal function timeout mapped to the timeout message.
   - open: not yet run against real Modal + HF Hub (do together with 2.4)
-- [ ] 3.3 Embed JS splat viewer; orbit/pan/zoom/reset
+- [x] 3.3 Embed JS splat viewer; orbit/pan/zoom/reset
+  - `splat_studio/space/viewer.py`: `@mkkellogg/gaussian-splats-3d` 0.4.7 (MIT, Three.js 0.170)
+    from jsDelivr, in an `<iframe srcdoc>`; the `.splat` is served via `/gradio_api/file=` from the
+    store's download folder (`allowed_paths`). Start camera from the median and 80th-percentile
+    radius of the Gaussians, z-up (gsplat normalises the world to z-up). Reset button + R key.
+  - 2026-11-13: checked locally with the real 1.55 M-Gaussian scene from job 20261113-132210-3749ae:
+    loads, orbit works, reset returns to the exact start camera. Scene opens upright. The start view
+    is from outside the scene, so for room captures the walls are in front; zoom in to enter.
+  - open: touch navigation not tried on a real phone; not yet tried on a deployed Space.
 - [ ] 3.4 Versions list, switch, download
 
 ## 4. Text editing

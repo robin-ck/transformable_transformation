@@ -1,11 +1,13 @@
+import html
 import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from splat_studio import modal_client
-from splat_studio.space import jobs, validation
+from splat_studio.space import jobs, validation, viewer
 from splat_studio.space.validation import UploadError, validate_upload
 
 # --- upload validation (task 3.1) ---------------------------------------------
@@ -211,3 +213,73 @@ def test_poll_reraises_function_timeout(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setitem(sys.modules, "modal", fake)
     with pytest.raises(FunctionTimeout):
         modal_client.poll("fc-1")
+
+
+# --- splat viewer (task 3.3) ----------------------------------------------------
+
+
+def _write_splat(path: Path, positions: np.ndarray) -> Path:
+    rec = np.zeros(len(positions), dtype=[("pos", "<f4", 3), ("rest", "u1", 20)])
+    rec["pos"] = positions
+    path.write_bytes(rec.tobytes())
+    return path
+
+
+def test_splat_positions_reads_and_subsamples(tmp_path: Path) -> None:
+    pts = np.arange(3000, dtype=np.float32).reshape(1000, 3)
+    f = _write_splat(tmp_path / "s.splat", pts)
+    assert np.array_equal(viewer.splat_positions(f), pts)
+    sub = viewer.splat_positions(f, max_points=100)
+    assert len(sub) == 100 and np.array_equal(sub[1], pts[10])
+    assert viewer.splat_positions(_write_splat(tmp_path / "e.splat", pts[:0])).shape == (0, 3)
+
+
+def test_camera_looks_at_centre_from_above_and_ignores_floaters() -> None:
+    rng = np.random.default_rng(0)
+    pts = rng.normal([5.0, -2.0, 1.0], 1.0, size=(5000, 3)).astype(np.float32)
+    pts[:10] = 1e4  # floaters
+    pts[10] = np.nan
+    cam = viewer.camera_for(pts)
+    assert np.allclose(cam.look_at, [5, -2, 1], atol=0.1)
+    offset = np.subtract(cam.position, cam.look_at)
+    assert offset[2] > 0  # above, with the default z-up
+    assert 1.0 < np.linalg.norm(offset) < 10.0
+    assert cam.up == (0.0, 0.0, 1.0)
+    assert viewer.camera_for(np.zeros((0, 3))).look_at == (0.0, 0.0, 0.0)
+
+
+def test_viewer_iframe_escapes_and_carries_config() -> None:
+    cam = viewer.Camera((1.0, 2.0, 3.0), (0.0, 0.0, 0.0))
+    doc = viewer.viewer_document('/gradio_api/file=/x/"a</script>.splat', cam)
+    assert "</script>.splat" not in doc  # cannot close the script tag early
+    assert '"position": [1.0, 2.0, 3.0]' in doc and "Reset view" in doc
+    assert viewer.VIEWER_JS in doc and viewer.THREE_JS in doc and "@0." in viewer.VIEWER_JS
+    frame = viewer.viewer_iframe("/s.splat", cam)
+    assert frame.startswith("<iframe") and frame.count("<") == 2  # page is fully escaped
+    assert html.unescape(frame.split('srcdoc="')[1].split('" style')[0]) == viewer.viewer_document(
+        "/s.splat", cam
+    )
+
+
+def test_file_url_is_gradio_route(tmp_path: Path) -> None:
+    url = viewer.file_url(tmp_path / "scene.splat")
+    assert url.startswith("/gradio_api/file=") and url.endswith("/scene.splat") and "\\" not in url
+
+
+def test_scene_html_from_store(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path)
+    assert "Pick a finished scene" in viewer.scene_html(store, None)
+    assert "No scene file" in viewer.scene_html(store, "scenes/j1/v1")
+    (tmp_path / "scenes/j1/v1").mkdir(parents=True)
+    _write_splat(tmp_path / "scenes/j1/v1/scene.splat", np.ones((10, 3), np.float32))
+    out = viewer.scene_html(store, "scenes/j1/v1")
+    assert out.startswith("<iframe") and "scenes/j1/v1/scene.splat" in out
+    assert store.file_dir == tmp_path
+
+
+def test_scene_html_reports_fetch_error() -> None:
+    class Broken:
+        def download(self, path: str) -> Path | None:
+            raise ConnectionError("offline")
+
+    assert "could not be fetched (ConnectionError)" in viewer.scene_html(Broken(), "scenes/x/v1")
