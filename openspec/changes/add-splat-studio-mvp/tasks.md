@@ -74,11 +74,14 @@
     10 s for the Gaussians); 918 k Gaussians. Placed into the real scene locally (Modal call
     replaced by that object): live preview, sliders, merge and cancel work; the merged object sits
     exactly at the slider values.
-  - open: the text-to-image step is not run yet: FLUX.1-schnell is gated and the HF account
-    behind the Modal secret has not accepted its terms. Not yet deployed (`modal deploy`) or tried
-    on the Space with HF Hub.
-  - open: objects are large (0.9 M Gaussians, 60 MB `.ply`), and they shift the viewer's start
-    camera towards the object. Pruning or capping object Gaussians may be worth doing.
+  - 2026-11-13: full run "a mature oak tree" (job `20261113-oak-tree`, FLUX terms accepted):
+    5 min 2 s, about $0.16, of which 154 s was the one-time FLUX download into the volume;
+    image 4.5 s, TRELLIS load 30.5 s, Gaussians 35.1 s. Clean reference image; 1.45 M Gaussians
+    (`.ply` 99 MB). Placed into the real scene locally: v2 with both model names in `version.json`.
+  - open: not yet deployed (`modal deploy`) or tried on the Space with HF Hub.
+  - open: objects are large (0.9-1.5 M Gaussians, 60-100 MB `.ply`), so a merged version grows
+    a lot, and they shift the viewer's start camera towards the object. Pruning or capping object
+    Gaussians may be worth doing.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
 - [ ] 4.5 Prompt log per version
