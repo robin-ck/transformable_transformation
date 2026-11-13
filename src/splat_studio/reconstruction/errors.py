@@ -82,3 +82,22 @@ def timeout(limit_s: int) -> ReconstructionError:
         f"The job exceeded its runtime limit of {limit_s // 60} minutes and was stopped.",
         "Tip: use a shorter video or fewer photos.",
     )
+
+
+def object_failed(detail: str) -> ReconstructionError:
+    return ReconstructionError(
+        "object_failed",
+        "Generating the object failed on the GPU. Please try again, or reword the prompt.",
+        f"Technical detail: {detail[-300:]}" if detail else "",
+    )
+
+
+def model_access(repo_id: str, detail: str = "") -> ReconstructionError:
+    """A gated model could not be downloaded with the configured HF token."""
+    return ReconstructionError(
+        "model_access",
+        f"The model {repo_id} could not be downloaded.",
+        f"Accept its terms on huggingface.co/{repo_id} with the account of the HF token "
+        "in the Modal secret, then try again.",
+        detail[-DETAIL_CHARS:],
+    )

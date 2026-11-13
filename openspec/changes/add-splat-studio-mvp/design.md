@@ -29,8 +29,8 @@ territory limit. Repo ids and pinned revisions live in `src/splat_studio/models.
 
 | Use | Model | Licence | GPU |
 |---|---|---|---|
-| Add object: text to image | `black-forest-labs/FLUX.1-schnell` | Apache-2.0 (gated: accept terms with the HF token) | A10G, CPU offload |
-| Add object: image to Gaussians | `microsoft/TRELLIS-image-large` | MIT | A10G |
+| Add object: text to image | `black-forest-labs/FLUX.1-schnell` | Apache-2.0 (gated: accept terms with the HF token) | L40S (transformer alone is 24 GB in bf16; does not fit an A10G) |
+| Add object: image to Gaussians | `microsoft/TRELLIS-image-large` | MIT | L40S (same job as FLUX) |
 | Add object: fallback text to Gaussians | `microsoft/TRELLIS-text-xlarge` | MIT | A10G |
 | Edit scene: per-view editor | `timbrooks/instruct-pix2pix` | MIT (card; SD 1.5 base, so OpenRAIL-M use rules apply) | A10G |
 | Preview: base | `stabilityai/stable-diffusion-xl-base-1.0` | OpenRAIL++-M | L4 |
@@ -47,10 +47,9 @@ Rejected:
 
 Risks:
 - TRELLIS code is MIT, but some of its rendering extensions (diffoctreerast, mip-splatting, nvdiffrast)
-  are research-only licences. We only need `save_ply` of the Gaussian output; install only what that
-  path needs, and note it in the README if a research-only extension is required.
-- TRELLIS needs 16 GB+ VRAM and spconv/kaolin builds; expect an image-build spike like gsplat's in 2.1.
-- Cache all weights in a Modal Volume (open question below).
+  are research-only licences. Checked in 4.2: the Gaussian path needs none of them; the image
+  installs only prebuilt wheels (xformers, spconv, kaolin 0.17 Apache-2.0, open3d MIT), no CUDA builds.
+- Weights are cached in the Modal Volume `splat-studio-models` (HF, torch hub and rembg caches).
 
 ## Open questions
 - Real cost per scene is unknown; task 2.1 measures it, and we decide whether a Kaggle fallback is needed.

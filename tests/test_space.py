@@ -96,6 +96,10 @@ class FakeClient:
         self.submitted.append((job_id, steps))
         return f"fc-{job_id}"
 
+    def submit_object(self, job_id: str, prompt: str, seed: int = 0) -> str:
+        self.submitted.append((job_id, prompt, seed))
+        return f"fc-{job_id}"
+
     def poll(self, call_id: str):
         r = self.results.get(call_id)
         if isinstance(r, Exception):
@@ -351,3 +355,34 @@ def test_download_file_named_per_version(tmp_path: Path) -> None:
     assert p2.parent == tmp_path / "store/downloads"
     missing = versions.Version("j9", 1)
     assert versions.download_file(store, missing, "splat") is None
+
+
+# --- object jobs (task 4.2) -------------------------------------------------------
+
+
+def test_object_job_lives_under_objects_and_finishes(tmp_path: Path) -> None:
+    store, client, clock = jobs.LocalStore(tmp_path / "s"), FakeClient(), Clock()
+    mgr = jobs.JobManager(store, client, clock, prefix="objects", timeout_s=900)
+    prompt = "a  mature\toak tree"
+    job = mgr.create_object(prompt, scene_id="scene1", seed=7)
+    assert client.submitted == [(job.job_id, prompt, 7)]
+    assert job.kind == "object" and job.summary == "a mature oak tree"
+    assert job.params == {"prompt": prompt, "seed": 7, "scene_id": "scene1"}
+    assert (store.root / "objects" / job.job_id / "job.json").is_file()
+    assert not (store.root / "jobs").exists()
+    store.write_json(f"objects/{job.job_id}/run.json", {"status": "running"})
+    assert mgr.refresh(job).status == "running"
+    client.results[job.call_id] = {"status": "done", "scene_path": f"objects/{job.job_id}"}
+    assert mgr.refresh(job).scene_path == f"objects/{job.job_id}"
+    assert [j.job_id for j in mgr.list()] == [job.job_id]
+
+
+def test_object_job_errors_use_object_wording(tmp_path: Path) -> None:
+    store, client, clock = jobs.LocalStore(tmp_path / "s"), FakeClient(), Clock()
+    mgr = jobs.JobManager(store, client, clock, prefix="objects", timeout_s=900)
+    crashed = mgr.create_object("lamp")
+    client.results[crashed.call_id] = RuntimeError("worker lost")
+    assert mgr.refresh(crashed).error["code"] == "object_failed"
+    slow = mgr.create_object("lamp")
+    client.results[slow.call_id] = type("FunctionTimeoutError", (Exception,), {})()
+    assert "15 minutes" in mgr.refresh(slow).error["message"]

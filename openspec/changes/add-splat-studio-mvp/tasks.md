@@ -59,7 +59,26 @@
     (TRELLIS-text-xlarge as fallback). Edit scene: InstructPix2Pix. Preview: SDXL + depth ControlNet.
   - `splat_studio/models.py` pins repo ids and commits; a test keeps licences in the allow list.
   - Hunyuan3D rejected: its licence excludes the EU. No model has been run yet (comes with 4.2-4.4).
-- [ ] 4.2 Add object: generate, convert to Gaussians, place/scale/rotate, merge
+- [x] 4.2 Add object: generate, convert to Gaussians, place/scale/rotate, merge
+  - Modal `generate_object` (L40S, 15 min cap): FLUX.1-schnell reference image, then
+    TRELLIS-image-large straight to Gaussians (no mesh step), stored normalised (base centre at
+    the origin, largest side 1) in `objects/<job>/` with `reference.png` and `run.json`.
+  - `splat_studio/editing/objects.py`: placement p' = size * Rz(turn) * p + (x, y, z), merge into
+    the scene's PLY layout; `space/add_object.py` writes the result as a new version with prompt,
+    model, object job and placement in `version.json`. Cancel writes nothing.
+  - Space: "Add object" section; the job is polled every 5 s; when done the viewer shows the
+    scene plus the object, and the sliders (move x/y, height, turn, size) move it live through
+    `postMessage`, without reloading the scene.
+  - 2026-11-13: TRELLIS step run on Modal with TRELLIS's own mailbox example image (job
+    `20261113-trellis-test`): 2 min 17 s, about $0.07 (first run: 52 s to download weights,
+    10 s for the Gaussians); 918 k Gaussians. Placed into the real scene locally (Modal call
+    replaced by that object): live preview, sliders, merge and cancel work; the merged object sits
+    exactly at the slider values.
+  - open: the text-to-image step is not run yet: FLUX.1-schnell is gated and the HF account
+    behind the Modal secret has not accepted its terms. Not yet deployed (`modal deploy`) or tried
+    on the Space with HF Hub.
+  - open: objects are large (0.9 M Gaussians, 60 MB `.ply`), and they shift the viewer's start
+    camera towards the object. Pruning or capping object Gaussians may be worth doing.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
 - [ ] 4.5 Prompt log per version

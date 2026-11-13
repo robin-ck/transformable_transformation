@@ -41,14 +41,14 @@ TEXT_TO_IMAGE = ModelSpec(
     repo_id="black-forest-labs/FLUX.1-schnell",
     revision="741f7c3ce8b383c54771c7003378a50191e9efe9",
     licence="apache-2.0",
-    gpu="A10G",
-    role="object reference image from the prompt (4 steps, CPU offload on 24 GB)",
+    gpu="L40S",
+    role="object reference image from the prompt (4 steps; 24 GB transformer needs 48 GB)",
 )
 IMAGE_TO_3D = ModelSpec(
     repo_id="microsoft/TRELLIS-image-large",
     revision="25e0d31ffbebe4b5a97464dd851910efc3002d96",
     licence="mit",
-    gpu="A10G",
+    gpu="L40S",
     role="3D Gaussians from the reference image; no mesh conversion needed",
 )
 TEXT_TO_3D_FALLBACK = ModelSpec(
