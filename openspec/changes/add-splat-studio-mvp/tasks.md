@@ -14,9 +14,13 @@
     `TORCH_CUDA_ARCH_LIST=8.6`. The gsplat 1.5.3 pin installs and builds.
 - [x] 2.2 Modal function: frame extraction, COLMAP poses, `gsplat` training, `.ply` + compressed export
 - [x] 2.3 Readable failure messages for pose failure
-- [ ] 2.4 Test on 2 sample videos and 1 photo set; record time per run
-  - open: needs a Modal account (not reachable from the dev sandbox)
-  - 2026-11-13: first two runs failed as `pose_failed`. Cause on our side: `sparse/` was never
+- [x] 2.4 Test on 2 sample videos and 1 photo set; record time per run
+  - Scope reduced to one successful video run (decided 2026-11-13); a photo-set run is still
+    untested and can be done as part of 5.1.
+  - 2026-11-13: job `20261113-132210-3749ae`, 1 video, 180 frames, A10G, 7,000 steps:
+    frames 10 s, poses 503 s, training 337 s, export 1 s; 14 min 26 s in total, about $0.31.
+    1.55 M Gaussians (`.ply` 367 MB, `.splat` 50 MB). COLMAP poses (CPU) take the most time.
+  - Earlier, the first two runs failed as `pose_failed`. Cause on our side: `sparse/` was never
     created, so `colmap mapper` exited with an error, and every mapper error was reported as bad
     footage. Fixed; COLMAP crashes now report `pose_tool_failed` and the log tail goes to `run.json`.
 
