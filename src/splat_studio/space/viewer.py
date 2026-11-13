@@ -18,6 +18,10 @@ object live, so dragging a slider does not reload the scene.
 Preview (task 4.3): on `{type: "get_camera", id}` the page replies to the sender with
 `{type: "camera", id, matrix, fov, aspect}` (Three.js camera-to-world, column-major),
 so the Modal job can render exactly the view on screen.
+
+Region (task 4.4): `{type: "region_mode", on}` shows an overlay where dragging draws
+a box (as fractions of the view, top left 0,0) instead of moving the camera; the
+camera reply then carries `region: [x0, y0, x1, y1]` (or null).
 """
 
 from __future__ import annotations
@@ -145,6 +149,13 @@ _PAGE = """<!doctype html>
   #bar button:hover { background: rgba(40,46,60,.9); }
   #help { position: absolute; left: 10px; bottom: 8px; z-index: 10; opacity: .7;
     font-size: 12px; pointer-events: none; }
+  #area { position: absolute; inset: 0; z-index: 8; display: none; cursor: crosshair;
+    touch-action: none; }
+  #area .hint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+    background: rgba(20,24,32,.85); border: 1px solid #4a5263; border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; pointer-events: none; }
+  #box { position: absolute; border: 2px dashed #ffb347; background: rgba(255,179,71,.15);
+    display: none; pointer-events: none; }
   #msg { position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; text-align: center; padding: 16px; z-index: 5; }
 </style>
@@ -152,6 +163,7 @@ _PAGE = """<!doctype html>
 </head><body>
 <div id="root"></div>
 <div id="msg">Loading scene…</div>
+<div id="area"><div class="hint">Drag a box over the part to edit</div><div id="box"></div></div>
 <div id="bar"><button id="reset" title="Reset view (R)">Reset view</button></div>
 <div id="help">Drag: orbit · Right-drag / two fingers: pan · Wheel / pinch: zoom · R: reset</div>
 <script type="module">
@@ -181,13 +193,44 @@ try {
   };
   document.getElementById("reset").addEventListener("click", reset);
   window.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R") reset(); });
-  // Preview (task 4.3): the Space asks for the current camera to render the same view.
+  // Region (task 4.4): while on, dragging draws a box instead of moving the camera.
+  const area = document.getElementById("area"), box = document.getElementById("box");
+  let region = null, start = null;
+  const frac = (e) => {
+    const r = area.getBoundingClientRect();
+    return [Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
+            Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)];
+  };
+  const drawBox = (r) => {
+    if (!r) { box.style.display = "none"; return; }
+    Object.assign(box.style, { display: "block", left: r[0] * 100 + "%", top: r[1] * 100 + "%",
+      width: (r[2] - r[0]) * 100 + "%", height: (r[3] - r[1]) * 100 + "%" });
+  };
+  area.addEventListener("pointerdown", (e) => {
+    start = frac(e); area.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  area.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    const [x, y] = frac(e);
+    region = [Math.min(start[0], x), Math.min(start[1], y),
+              Math.max(start[0], x), Math.max(start[1], y)];
+    drawBox(region);
+  });
+  area.addEventListener("pointerup", () => { start = null; });
+  // Preview (task 4.3) and edit (4.4): the Space asks for the current camera (and box).
   window.addEventListener("message", (e) => {
     const d = e.data, c = viewer.camera;
-    if (!d || d.type !== "get_camera" || !c || !e.source) return;
+    if (!d) return;
+    if (d.type === "region_mode") {
+      area.style.display = d.on ? "block" : "none";
+      if (!d.on) { region = null; drawBox(null); }
+      return;
+    }
+    if (d.type !== "get_camera" || !c || !e.source) return;
     c.updateMatrixWorld();
     e.source.postMessage({ type: "camera", id: d.id, matrix: Array.from(c.matrixWorld.elements),
-      fov: c.fov, aspect: c.aspect }, "*");
+      fov: c.fov, aspect: c.aspect,
+      region: area.style.display === "block" ? region : null }, "*");
   });
   if (cfg.object) {
     const o = cfg.object;

@@ -8,7 +8,9 @@ State lives in the dataset repo, so a job survives the user closing the page:
 Object jobs (task 4.2) use the same layout under `objects/<job_id>/`, with the
 generated object in `object.ply`, `object.splat` and `reference.png`.
 Preview jobs (task 4.3) live under `previews/<job_id>/` with `render.png`, `depth.png`
-and `preview.png`; they never write to `scenes/`.
+and `preview.png`; they never write to `scenes/`. Edit jobs (task 4.4) live under
+`edits/<job_id>/` with before/after renders; the worker itself saves the edited scene
+as the next version under `scenes/`, and its run log names it (`version`).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ FINAL = {"done", "failed"}
 TRAIN_TIMEOUT_S = 60 * 60  # keep in sync with modal_app/app.py
 OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
+EDIT_TIMEOUT_S = 30 * 60  # keep in sync with modal_app/app.py
 
 
 class Store(Protocol):
@@ -118,8 +121,8 @@ class HubStore:
         return json.loads(Path(local).read_text())
 
     def list_dirs(self, prefix: str) -> list[str]:
-        from huggingface_hub import RepoFolder
         from huggingface_hub.errors import EntryNotFoundError
+        from huggingface_hub.hf_api import RepoFolder  # top-level export is newer
 
         try:
             tree = self.api.list_repo_tree(self.repo_id, path_in_repo=prefix, repo_type="dataset")
@@ -223,6 +226,29 @@ class JobManager:
         self._save(job)
         return self._start(job, lambda: self.client.submit_object(job.job_id, prompt, seed=seed))
 
+    def create_edit(
+        self,
+        prompt: str,
+        scene_id: str,
+        number: int,
+        camera: dict,
+        region: list[float] | None = None,
+        seed: int = 0,
+    ) -> Job:
+        """Record an edit job for version `number` of a scene and start it on Modal."""
+        now = self.clock()
+        job = Job(new_job_id(now), "edit", " ".join(prompt.split())[:80], now)
+        job.params = {"prompt": prompt, "scene_id": scene_id, "version": number,
+                      "camera": camera, "region": region, "seed": seed,
+                      "model": models.IMAGE_EDIT.label}  # fmt: skip
+        self._save(job)
+        return self._start(
+            job,
+            lambda: self.client.submit_edit(
+                job.job_id, scene_id, number, camera, prompt, region=region, seed=seed
+            ),
+        )
+
     def create_preview(
         self,
         prompt: str,
@@ -265,9 +291,11 @@ class JobManager:
             state, result = self.client.poll(job.call_id) if job.call_id else ("running", None)
         except Exception as e:
             run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
-            failed = {"object": errors.object_failed, "preview": errors.preview_failed}.get(
-                job.kind, errors.training_failed
-            )
+            failed = {
+                "object": errors.object_failed,
+                "preview": errors.preview_failed,
+                "edit": errors.edit_failed,
+            }.get(job.kind, errors.training_failed)
             if run and run.get("status") in FINAL:
                 self._apply_result(job, run)
             elif type(e).__name__ == "FunctionTimeoutError":

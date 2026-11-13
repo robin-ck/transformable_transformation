@@ -115,6 +115,9 @@ object_image = (
 # about 10 GB, so an L4 (24 GB) is enough.
 PREVIEW_GPU = "L4"
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with splat_studio/space/jobs.py
+# Edit scene (task 4.4) uses the same image: gsplat for training, diffusers for IP2P.
+EDIT_GPU = "A10G"
+EDIT_TIMEOUT_S = 30 * 60  # keep in sync with splat_studio/space/jobs.py
 
 preview_image = (
     gsplat_image.pip_install(
@@ -404,6 +407,154 @@ def generate_object(
     _upload_json(api, repo, f"{prefix}/run.json", result)
     print(json.dumps(result))
     return result
+
+
+@app.function(
+    image=preview_image,
+    gpu=EDIT_GPU,
+    timeout=EDIT_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+)
+def edit_scene(
+    job_id: str,
+    scene_id: str,
+    number: int,
+    camera: dict,
+    prompt: str,
+    region: list[float] | None = None,
+    seed: int = 0,
+    steps: int = 1500,
+) -> dict:
+    """Edit version `number` of a scene from a text instruction; saves the next version.
+
+    Writes the result as a new version itself (scenes/<id>/v<n>/ with version.json),
+    so it is kept even if nobody has the Space open when the job ends. Before/after
+    renders of the user's view go to edits/<job_id>/.
+    """
+    t = time.time()
+    from huggingface_hub import HfApi, hf_hub_download
+
+    from splat_studio import models
+    from splat_studio.editing import edit_worker, scene_edit
+    from splat_studio.editing.preview import ViewCamera
+    from splat_studio.reconstruction import errors
+    from splat_studio.reconstruction.cost import RunLog
+    from splat_studio.space.jobs import HubStore
+    from splat_studio.space.versions import add_version
+
+    repo = os.environ["SPLAT_STUDIO_DATASET"]
+    api = HfApi()
+    prefix = f"edits/{job_id}"
+    log = RunLog(job_id=job_id, gpu=EDIT_GPU)
+    log.stage("imports", time.time() - t)
+    _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+    spec = models.IMAGE_EDIT
+
+    def on_stage(name: str, seconds: float) -> None:
+        """Log the stage and publish the run log, so the Space can show progress."""
+        log.stage(name, seconds)
+        try:
+            _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+        except Exception as e:  # progress is nice to have; never fail the edit for it
+            print(f"progress upload failed: {e!r}")
+
+    try:
+        cam = ViewCamera.from_dict(camera)
+        area = scene_edit.Region(*region) if region else None
+        t = time.time()
+        ply = hf_hub_download(repo, f"scenes/{scene_id}/v{number}/scene.ply", repo_type="dataset")
+        log.stage("download_scene", time.time() - t)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = edit_worker.run_edit(
+                Path(ply),
+                cam,
+                prompt,
+                Path(tmp),
+                model=(spec.repo_id, spec.revision),
+                region=area,
+                settings=edit_worker.EditSettings(steps=steps, seed=seed),
+                on_stage=on_stage,
+            )
+            models_volume.commit()  # keep downloaded weights for the next run
+            t = time.time()
+            # The edited scene goes to edits/<job>/ first, so a failure while saving the
+            # version below does not lose the training result.
+            for name, path in [("before.png", res.before), ("after.png", res.after),
+                               ("edit_example.png", res.example), ("scene.ply", res.ply),
+                               ("scene.splat", res.splat)]:  # fmt: skip
+                api.upload_file(path_or_fileobj=str(path), path_in_repo=f"{prefix}/{name}",
+                                repo_id=repo, repo_type="dataset")  # fmt: skip
+            store = HubStore(repo, os.environ.get("HF_TOKEN"), cache_dir=Path(tmp) / "cache")
+            version = add_version(
+                store,
+                scene_id,
+                {"ply": res.ply, "splat": res.splat},
+                mode="edit_scene",
+                prompt=prompt,
+                model=spec.label,
+                parent=number,
+                extra={
+                    "edit_job": job_id,
+                    "region": area.to_list() if area else None,
+                    "camera": camera,
+                    "seed": seed,
+                    "steps": steps,
+                },
+            )
+            log.stage("upload", time.time() - t)
+        log.finish("done")
+        result = {
+            **log.to_dict(),
+            "scene_path": version.path,
+            "version": version.number,
+            "parent": number,
+            "model": spec.label,
+            "prompt": prompt,
+            "region": area.to_list() if area else None,
+            "num_gaussians": res.num_gaussians,
+            "num_selected": res.num_selected,
+            "size": list(res.size),
+            **res.stats,
+        }
+    except errors.ReconstructionError as e:
+        result = log.finish("failed", e.to_dict()).to_dict()
+    except Exception as e:
+        import traceback
+
+        err = errors.edit_failed(repr(e))
+        err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
+        result = log.finish("failed", err.to_dict()).to_dict()
+
+    _upload_json(api, repo, f"{prefix}/run.json", result)
+    print(json.dumps(result))
+    return result
+
+
+@app.function(image=preview_image, timeout=120, secrets=[hf_secret])
+def check_edit_image() -> dict:
+    """Cheap CPU check that the preview/edit image can import what the jobs need."""
+    import diffusers
+    import huggingface_hub
+
+    out = {"huggingface_hub": huggingface_hub.__version__, "diffusers": diffusers.__version__}
+    try:
+        from splat_studio.editing import edit_worker, scene_edit  # noqa: F401
+        from splat_studio.space.jobs import HubStore
+        from splat_studio.space.versions import list_versions
+
+        repo = os.environ.get("SPLAT_STUDIO_DATASET")
+        out["imports"] = "ok"
+        if repo:  # exercise the folder listing that failed in the first edit runs
+            store = HubStore(repo, os.environ.get("HF_TOKEN"), cache_dir=Path("/tmp/c"))
+            out["versions_of_first_scene"] = [
+                v.number for s in store.list_dirs("scenes")[:1] for v in list_versions(store, s)
+            ]
+    except Exception as e:
+        out["imports"] = f"{type(e).__name__}: {str(e)[:300]}"
+    print(json.dumps(out))
+    return out
 
 
 PREVIEW_NEGATIVE = "blurry, low quality, distorted, deformed, oversaturated, text, watermark"

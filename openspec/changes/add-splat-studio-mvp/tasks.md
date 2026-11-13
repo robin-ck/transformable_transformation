@@ -118,7 +118,56 @@
     cached, else build them into the image. L4 availability: if it keeps queueing, move
     the default to A10G. The Space's own button click reached Modal (the camera arrived
     correctly) but the successful run was spawned from the CLI with that recorded camera.
-- [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
+- [x] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
+  - Views: the training cameras are not stored and edited versions have no photos, so
+    the job renders its own dataset: 40 views orbiting the viewer's camera (+-30 deg yaw,
+    +-10 deg pitch, +-15 % distance) around the point it looks at (median depth of the view).
+    The edit is therefore strongest around the user's view. `editing/scene_edit.py`
+    (numpy, unit tested): cameras, region, PLY <-> gsplat arrays.
+  - `editing/edit_worker.py` (Modal only): render the 40 views, edit each once with
+    InstructPix2Pix (fp16, DDIM 20 steps, guidance 7.5 / image 1.5), then 1,500 Adam steps
+    (L1 + 0.2 D-SSIM, gsplat's learning rates, no densification); every 10 steps one view
+    is re-rendered, re-noised (t in 0.70-0.98) and re-edited, as in Instruct-NeRF2NeRF.
+  - Region: the user switches on "Limit to a region" and drags a box in the viewer
+    (overlay; the camera stays still). Gaussians whose centre is in the box and not more
+    than 20 % behind the first dense surface of its 16 px screen cell (15th percentile of
+    centre depths) are selected; only they get gradients, and each edited target keeps the
+    original render outside the selection's footprint (coverage-normalised soft mask).
+    The orbit pivot is the median centre depth in view. Both use centres, not a depth
+    render, because haze in front of surfaces pulls rendered depth towards the camera.
+  - Modal `edit_scene` (A10G, 30 min cap) saves the result itself as the next version
+    (`version.json`: prompt, model, parent, region, camera, seed, steps), so it survives a
+    closed page; `edits/<job>/` keeps before/after renders, one edited view and the scene.
+    Stage timings are published while it runs, for the Space's progress line.
+  - Space: "Edit scene" section (instruction, region switch, seed), polled every 10 s; when
+    done the version list and viewer switch to the new version. Running and failed edits
+    appear in the prompt log.
+  - 2026-11-13 runs on the real scene, "make the wooden table bright green", A10G:
+    - Whole view (job `20261113-162643-6273b5`): 8 min 12 s, about $0.15. Download 40 s,
+      render views 89 s, load editor 14 s, first edits 62 s, training 278 s. Training
+      reproduced the edit consistently, but InstructPix2Pix tinted the whole room green,
+      not just the table. Saving the version failed: the image's `huggingface_hub` 0.36
+      has no top-level `RepoFolder`; fixed (import from `hf_api`), checked in the image,
+      and the scene now goes to `edits/<job>/` before the version is written.
+    - Region around the table (job `20261113-162648-52f1a8`): same timings and failure;
+      only a faint tint, because the depth test was too strict (5 %) and the blend mask
+      was opacity-weighted. Now 20 % and the mask is normalised by coverage.
+    - Rerun with the save fix (job `20261113-164258-d27726`): saved as v2, but only 155
+      Gaussians selected and pivot 0.74: the rendered depth sat in the haze (0.7) while
+      the table is at 1.2-2.0. Switched surface and pivot to centre depths (see above;
+      checked locally on the real scene: 413 k selected, table and floor, not the wall).
+    - Rerun (job `20261113-165311-5ec895`): 7 min 33 s, about $0.14 (render views 71 s,
+      first edits 63 s, training 281 s, upload 25 s). 413 k Gaussians selected, pivot 1.83.
+      Saved as v3 (parent v1): the table is clearly green, the rest of the room unchanged;
+      some green spills onto the floor next to the table, inside the box.
+  - open: InstructPix2Pix tints the whole view for object-level instructions without a
+    region, so the region is needed for local edits. `render_views` takes 70-90 s in
+    every fresh container (same as the preview's render: probably gsplat compiling its
+    CUDA kernels; build them into the image). The runs were started from a script with the
+    camera recorded in the Space; the Space's own Edit button was checked up to the
+    request (camera and box arrive), not through a full run. Two edits finishing at the
+    same moment could pick the same version number. v2 (155-Gaussian edit) stays in
+    the dataset as a nearly unchanged version.
 - [x] 4.5 Prompt log per version
   - `splat_studio/space/prompt_log.py` reads what is already stored: each version's
     `version.json` (prompt, mode, model, parent, date) and each preview's `job.json`.
@@ -135,3 +184,19 @@
 ## 5. Wrap-up
 - [ ] 5.1 End-to-end test: upload → scene → add object → edit → preview
 - [ ] 5.2 README usage guide with screenshots
+- [ ] 5.3 Move the object merge from the Space to Modal, so the UI server stays light
+  - Why: `place_object` (`space/add_object.py`) runs `merge_files` (`editing/objects.py`) in the
+    Space process. It downloads the full scene PLY (367 MB for the test scene), loads it into
+    numpy and uploads the result: 1–1.5 GB peak RAM. On the planned Hetzner server (2 vCPU,
+    4 GB shared with other services, see `docs/handoff-hetzner-deploy.md`) that can crowd out
+    other services or get OOM-killed.
+  - Do: a CPU-only Modal function (no GPU) that reads the scene and object PLY from the HF
+    dataset, applies the `Placement`, merges, writes `scene.ply` + `scene.splat` as the next
+    version, and returns the version info. The Space only sends job id, scene id, source
+    version and placement, then polls like the other jobs.
+  - Keep: the version and prompt-log records stay as they are (`version.json` with prompt,
+    mode, model, parent). The placement step in the viewer is unchanged.
+  - Done when: adding an object never loads a full scene PLY on the Space (peak RSS of
+    `space/app.py` stays under ~500 MB during a merge), unit tests cover the new job with
+    mocked Modal calls, and one real merge on the test scene is recorded here with time and
+    Modal cost.
