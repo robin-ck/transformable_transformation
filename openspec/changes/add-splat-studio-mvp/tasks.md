@@ -53,7 +53,12 @@
     has no `.ply`); not yet tried against HF Hub, where the `.ply` (367 MB) is fetched on click.
 
 ## 4. Text editing
-- [ ] 4.1 Licence check and pick text-to-3D, image-edit and preview models
+- [x] 4.1 Licence check and pick text-to-3D, image-edit and preview models
+  - 2026-11-13: licences read from the HF model cards; choice and rejected models in design.md
+    (Models). Add object: FLUX.1-schnell image, then TRELLIS-image-large to Gaussians
+    (TRELLIS-text-xlarge as fallback). Edit scene: InstructPix2Pix. Preview: SDXL + depth ControlNet.
+  - `splat_studio/models.py` pins repo ids and commits; a test keeps licences in the allow list.
+  - Hunyuan3D rejected: its licence excludes the EU. No model has been run yet (comes with 4.2-4.4).
 - [ ] 4.2 Add object: generate, convert to Gaussians, place/scale/rotate, merge
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
