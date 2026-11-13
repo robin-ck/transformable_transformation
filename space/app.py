@@ -19,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
+from splat_studio.editing.scene_edit import RegionError, region_from_viewer  # noqa: E402
 from splat_studio.space import prompt_log  # noqa: E402
 from splat_studio.space.add_object import PlaceError, place_object, start_placement  # noqa: E402
 from splat_studio.space.jobs import (  # noqa: E402
+    EDIT_TIMEOUT_S,
     OBJECT_TIMEOUT_S,
     PREVIEW_TIMEOUT_S,
     HubStore,
@@ -53,6 +55,7 @@ STORE = HubStore(DATASET, os.environ.get("HF_TOKEN")) if DATASET else LocalStore
 JOBS = JobManager(STORE)
 OBJECTS = JobManager(STORE, prefix="objects", timeout_s=OBJECT_TIMEOUT_S)
 PREVIEWS = JobManager(STORE, prefix="previews", timeout_s=PREVIEW_TIMEOUT_S)
+EDITS = JobManager(STORE, prefix="edits", timeout_s=EDIT_TIMEOUT_S)
 STATUS_LABEL = {
     "queued": "⏳ queued",
     "running": "⚙️ running",
@@ -127,7 +130,8 @@ def log_outputs(job_id: str | None, number: int | None):
     if not versions:
         return "", gr.update(value=[])
     previews = [j for j in PREVIEWS.list(refresh=False) if j.kind == "preview"]
-    rows = [e.row() for e in prompt_log.scene_log(job_id, versions, previews)]
+    edits = [j for j in EDITS.list(refresh=False) if j.params.get("scene_id") == job_id]
+    rows = [e.row() for e in prompt_log.scene_log(job_id, versions, previews, edits)]
     return prompt_log.history_markdown(versions, number), gr.update(value=rows)
 
 
@@ -343,6 +347,94 @@ def on_preview_tick(preview_job: str | None):
     ]
 
 
+# --- edit scene (task 4.4) -----------------------------------------------------------
+
+REGION_JS = """(on) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  if (f && f.contentWindow) f.contentWindow.postMessage({type: "region_mode", on}, "*");
+  return on;
+}"""
+
+
+def on_edit(camera_json, scene_id, number, prompt, region_on, seed, placing):
+    version = _version(scene_id, number)
+    if version is None:
+        raise gr.Error("Pick a finished scene first.")
+    if placing:
+        raise gr.Error("Place or cancel the object first.")
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise gr.Error("Write an instruction first, e.g. 'make the table green'.")
+    try:
+        camera = camera_from_viewer(camera_json)
+        region = region_from_viewer(camera_json) if region_on else None
+    except (CameraError, RegionError) as e:
+        raise gr.Error(str(e)) from e
+    if region_on and region is None:
+        raise gr.Error("Drag a box in the viewer first, or switch off 'Limit to a region'.")
+    job = EDITS.create_edit(
+        prompt,
+        scene_id,
+        version.number,
+        camera.to_dict(),
+        region=region.to_list() if region else None,
+        seed=int(seed or 0),
+    )
+    if job.status == "failed":
+        return f"**Could not start.** {job.error['message']}", None
+    where = "inside the marked box" if region else "around this view"
+    return (
+        f"⚙️ Editing v{version.number} {where} (job {job.job_id}). This takes about "
+        "10 minutes; the result is saved as a new version even if you close the page.",
+        job.job_id,
+    )
+
+
+EDIT_STAGES = {
+    "download_scene": "loading the scene",
+    "load_scene": "rendering views",
+    "render_views": "loading the image editor",
+    "load_editor": "editing the views",
+    "first_edits": "training on the edited views",
+    "train": "saving",
+}
+
+
+def on_edit_tick(edit_job: str | None, scene_id: str | None):
+    """Poll the edit job. Outputs: status, edit_job, version list, viewer, region switch."""
+    rest = [gr.skip()] * 3
+    if not edit_job:
+        return [gr.skip(), gr.skip(), *rest]
+    job = EDITS.get(edit_job)
+    job = EDITS.refresh(job) if job else None
+    if job is None:
+        return ["The edit job was not found.", None, *rest]
+    if job.status == "failed":
+        err = job.error or {}
+        msg = f"❌ **Edit failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        return [msg, None, *rest]
+    elapsed = format_elapsed(job.elapsed(EDITS.clock()))
+    if job.status != "done":
+        if job.status == "queued":
+            return [f"⏳ Waiting for a GPU: **{job.summary}** ({elapsed})", gr.skip(), *rest]
+        stages = list((job.run or {}).get("stages", {}))
+        doing = EDIT_STAGES.get(stages[-1], "starting") if stages else "starting"
+        return [f"⚙️ Editing: **{job.summary}**, {doing} ({elapsed})", gr.skip(), *rest]
+    number = (job.run or {}).get("version")
+    msg = f"✅ **{job.summary}** saved as v{number} ({elapsed})."
+    if scene_id != job.params.get("scene_id"):
+        return [msg + " Pick its scene to see it.", None, *rest]
+    versions = _versions(scene_id)
+    new = next((v for v in versions if v.number == number), None)
+    return [
+        msg,
+        None,
+        gr.update(choices=[(v.label(), v.number) for v in versions], value=number),
+        scene_html(STORE, new.path if new else None),
+        False,
+    ]
+
+
 def on_download(job_id: str | None, number: int | None, kind: str):
     version = _version(job_id, number)
     if version is None:
@@ -384,7 +476,11 @@ def build() -> gr.Blocks:
         refresh = gr.Button("Refresh")
 
         gr.Markdown("## Scene")
-        picker = gr.Dropdown(label="Finished scene", choices=[], value=None)
+        # Pages left open across a server restart still send their old choice;
+        # refresh_all clears values that are not (or no longer) a finished scene.
+        picker = gr.Dropdown(
+            label="Finished scene", choices=[], value=None, allow_custom_value=True
+        )
         version = gr.Radio(label="Version (newest first)", choices=[], value=None)
         history = gr.Markdown()
         with gr.Accordion("Prompt log (every prompt, model and result for this scene)", open=False):
@@ -440,6 +536,20 @@ def build() -> gr.Blocks:
         pv_go = gr.Button("Preview this view")
         pv_status = gr.Markdown()
 
+        gr.Markdown(
+            "## Edit scene\nChange the scene itself from an instruction; the result is a new "
+            "version. The edit is strongest around the current view, so aim the camera first."
+        )
+        edit_job = gr.State(None)
+        with gr.Row():
+            ed_prompt = gr.Textbox(label="Instruction", placeholder="make the table green", scale=4)
+            ed_region = gr.Checkbox(
+                label="Limit to a region (drag a box in the viewer)", value=False, scale=2
+            )
+            ed_seed = gr.Number(label="Seed", value=0, precision=0, scale=1)
+        ed_go = gr.Button("Edit scene")
+        ed_status = gr.Markdown()
+
         files.change(on_upload, files, [message, create])
         create.click(on_create, files, [message, table])
         refresh.click(refresh_all, picker, [table, picker])
@@ -485,6 +595,19 @@ def build() -> gr.Blocks:
         )
         # A started or finished preview adds a line to the prompt log.
         pv_status.change(log_outputs, [picker, version], [history, log_table])
+        ed_region.input(None, ed_region, ed_region, js=REGION_JS)
+        # A new viewer page starts without the box overlay, so switch the region off.
+        viewer.change(lambda: False, None, ed_region)
+        ed_go.click(
+            on_edit,
+            [camera_json, picker, version, ed_prompt, ed_region, ed_seed, placing],
+            [ed_status, edit_job],
+            js=GET_CAMERA_JS,
+        )
+        gr.Timer(10).tick(
+            on_edit_tick, [edit_job, picker], [ed_status, edit_job, version, viewer, ed_region]
+        )
+        ed_status.change(log_outputs, [picker, version], [history, log_table])
         get_ply.click(lambda j, n: on_download(j, n, "ply"), [picker, version], download)
         get_splat.click(lambda j, n: on_download(j, n, "splat"), [picker, version], download)
     return demo
