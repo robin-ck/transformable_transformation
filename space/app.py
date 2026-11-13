@@ -31,6 +31,20 @@ from splat_studio.space.validation import HELP, UploadError, validate_upload  # 
 from splat_studio.space.versions import download_file, list_versions  # noqa: E402
 from splat_studio.space.viewer import scene_html  # noqa: E402
 
+
+def load_env_file(path: Path) -> None:
+    """Read KEY=VALUE lines from a local `.env` (git-ignored); real env vars win."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_env_file(Path(__file__).resolve().parent.parent / ".env")  # local runs only
 DATASET = os.environ.get("SPLAT_STUDIO_DATASET")
 STORE = HubStore(DATASET, os.environ.get("HF_TOKEN")) if DATASET else LocalStore(Path("local_data"))
 JOBS = JobManager(STORE)

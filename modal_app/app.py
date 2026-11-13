@@ -248,6 +248,7 @@ def generate_object(
 
     from splat_studio import models
     from splat_studio.editing.objects import normalise_object
+    from splat_studio.editing.simplify import simplify
     from splat_studio.reconstruction import errors
     from splat_studio.reconstruction.cost import RunLog
     from splat_studio.reconstruction.export import read_ply, to_splat_bytes, write_ply
@@ -262,7 +263,34 @@ def generate_object(
         model_label = models.IMAGE_TO_3D.label
 
     try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        t = time.time()
         from trellis.pipelines import TrellisImageTo3DPipeline  # fail fast on a broken image
+
+        log.stage("imports", time.time() - t)
+
+        def prefetch_trellis() -> str:
+            """Read TRELLIS's weight files into the page cache while FLUX loads and runs.
+
+            Only file reads: building TRELLIS's models in this thread is not safe, because
+            diffusers builds FLUX under accelerate's init_empty_weights, which patches
+            torch.nn for the whole process and would leave TRELLIS's weights empty.
+            """
+            path = snapshot_download(
+                models.IMAGE_TO_3D.repo_id, revision=models.IMAGE_TO_3D.revision
+            )
+            roots = [Path(path), Path(os.environ["TORCH_HOME"]), Path(os.environ["U2NET_HOME"])]
+            for root in roots:
+                for f in root.rglob("*") if root.exists() else []:
+                    if f.is_file() and f.stat().st_size > 1_000_000:
+                        with f.open("rb") as fh:
+                            while fh.read(16 << 20):
+                                pass
+            return path
+
+        loader = ThreadPoolExecutor(max_workers=1)
+        trellis_future = loader.submit(prefetch_trellis)
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -303,9 +331,10 @@ def generate_object(
                 log.stage("image", time.time() - t)
 
             t = time.time()
-            trellis_dir = snapshot_download(
-                models.IMAGE_TO_3D.repo_id, revision=models.IMAGE_TO_3D.revision
-            )
+            trellis_dir = trellis_future.result()
+            loader.shutdown()
+            log.stage("wait_prefetch", time.time() - t)
+            t = time.time()
             trellis = TrellisImageTo3DPipeline.from_pretrained(trellis_dir)
             trellis.cuda()
             models_volume.commit()  # keep downloaded weights for the next run
@@ -314,12 +343,19 @@ def generate_object(
             t = time.time()
             out = trellis.run(image, seed=seed, formats=["gaussian"])
             raw = tmp_path / "raw.ply"
-            out["gaussian"][0].save_ply(str(raw))  # default transform: TRELLIS y-up -> z-up
-            obj = normalise_object(read_ply(raw))
-            write_ply(tmp_path / "object.ply", obj)
-            (tmp_path / "object.splat").write_bytes(to_splat_bytes(obj))
+            # TRELLIS's own frame is z-up like our scenes; its default transform would turn
+            # the object to y-up for other viewers, so keep the frame as it is.
+            out["gaussian"][0].save_ply(str(raw), transform=None)
             log.stage("gaussians", time.time() - t)
 
+            t = time.time()
+            raw_gaussians = read_ply(raw)
+            obj = simplify(normalise_object(raw_gaussians))
+            write_ply(tmp_path / "object.ply", obj)
+            (tmp_path / "object.splat").write_bytes(to_splat_bytes(obj))
+            log.stage("simplify", time.time() - t)
+
+            t = time.time()
             for name in ["object.ply", "object.splat", "reference.png"]:
                 api.upload_file(
                     path_or_fileobj=str(tmp_path / name),
@@ -327,11 +363,13 @@ def generate_object(
                     repo_id=repo,
                     repo_type="dataset",
                 )
+            log.stage("upload", time.time() - t)
         log.finish("done")
         result = {
             **log.to_dict(),
             "scene_path": prefix,
             "num_gaussians": len(obj),
+            "raw_gaussians": len(raw_gaussians),
             "model": model_label,
             "prompt": prompt,
             "seed": seed,

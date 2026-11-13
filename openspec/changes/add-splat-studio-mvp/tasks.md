@@ -78,10 +78,18 @@
     5 min 2 s, about $0.16, of which 154 s was the one-time FLUX download into the volume;
     image 4.5 s, TRELLIS load 30.5 s, Gaussians 35.1 s. Clean reference image; 1.45 M Gaussians
     (`.ply` 99 MB). Placed into the real scene locally: v2 with both model names in `version.json`.
-  - open: not yet deployed (`modal deploy`) or tried on the Space with HF Hub.
-  - open: objects are large (0.9-1.5 M Gaussians, 60-100 MB `.ply`), so a merged version grows
-    a lot, and they shift the viewer's start camera towards the object. Pruning or capping object
-    Gaussians may be worth doing.
+  - Fix (same day): objects were saved lying on their side. TRELLIS's `save_ply` turns its
+    z-up frame to y-up by default; now saved with `transform=None`. Checked: trunk below leaves.
+  - Speed-up: TRELLIS's weight files are read into memory while FLUX loads (building both models
+    in parallel threads is not safe: diffusers' init_empty_weights patches torch for the whole
+    process). `editing/simplify.py` merges the object's Gaussians per grid cell (moment
+    matching) down to <= 250 k. Oak: 1.45 M -> 208 k Gaussians, `.ply` 99 -> 14 MB, 2.5 s;
+    side by side it looks nearly the same (leaf clumps slightly softer).
+  - 2026-11-13 rerun (job `20261113-oak-tree-v2`, weights cached): 2 min 11 s in the container,
+    about $0.07. FLUX load 22 s, image 4 s, TRELLIS load 22 s, Gaussians 13 s, trim 2.5 s; about
+    65 s was not covered by a stage, so imports and uploads are now logged too.
+  - Deployed with `modal deploy` (2026-11-13). The Space reads a local `.env` for HF_TOKEN and
+    SPLAT_STUDIO_DATASET. open: not yet tried from the Space against HF Hub.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
 - [ ] 4.5 Prompt log per version
