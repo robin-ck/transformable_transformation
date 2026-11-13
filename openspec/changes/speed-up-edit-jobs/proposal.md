@@ -23,4 +23,5 @@ Edits are too slow for trying out ideas. On the test scene (1.55 M Gaussians), E
   - Object merge on Modal (MVP task 5.3). It should use the new scene cache.
   - Reconstruction speed (COLMAP poses), though it gains from the gsplat build too.
   - The Space's polling intervals.
+  - A later addition for the object (Add object). It is a placeholder in tasks.md (7.1) until its scope is decided.
 - No breaking changes: stored scenes, versions and job records keep their format.

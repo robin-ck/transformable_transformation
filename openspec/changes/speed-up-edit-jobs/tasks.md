@@ -63,3 +63,6 @@ MVP task 5.3 (object merge on Modal) should use `scene_cache` once task 2 is don
 - [ ] 6.5 MVP tasks.md:
   - under 4.3 and 4.4, mark the "render step" open items as fixed by this change
   - under 5.3, note that the Modal merge should use `scene_cache`
+
+## 7. Later: object addition
+- [ ] 7.1 Something more for the object (Add object) is to be added later. The scope is not decided yet. Write it up as its own tasks, or as a separate change if it changes behaviour, before starting.
