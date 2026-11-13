@@ -41,7 +41,16 @@
     loads, orbit works, reset returns to the exact start camera. Scene opens upright. The start view
     is from outside the scene, so for room captures the walls are in front; zoom in to enter.
   - open: touch navigation not tried on a real phone; not yet tried on a deployed Space.
-- [ ] 3.4 Versions list, switch, download
+- [x] 3.4 Versions list, switch, download
+  - `splat_studio/space/versions.py`: each version is an immutable folder `scenes/<id>/v<n>/`
+    with `version.json` (date, mode, prompt, model, parent); `add_version` always appends, so
+    switching back never loses later versions. v1 from the worker has no `version.json` and
+    falls back to the job's finish time. Downloads are hard-linked as `<id>-v<n>.ply/.splat`.
+  - Space: version radio list (newest first, shows date + prompt), viewer follows the selected
+    version, "Download .ply" / "Download .splat" buttons fill a file link.
+  - 2026-11-13: checked locally with the real scene plus a temporary fake v2: list, switch and
+    `.splat` download (47.5 MB) work. `.ply` download only covered by unit tests (the local copy
+    has no `.ply`); not yet tried against HF Hub, where the `.ply` (367 MB) is fetched on click.
 
 ## 4. Text editing
 - [ ] 4.1 Licence check and pick text-to-3D, image-edit and preview models

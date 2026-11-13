@@ -25,6 +25,7 @@ from splat_studio.space.jobs import (  # noqa: E402
     format_elapsed,
 )
 from splat_studio.space.validation import HELP, UploadError, validate_upload  # noqa: E402
+from splat_studio.space.versions import download_file, list_versions  # noqa: E402
 from splat_studio.space.viewer import scene_html  # noqa: E402
 
 DATASET = os.environ.get("SPLAT_STUDIO_DATASET")
@@ -78,9 +79,47 @@ def refresh_all(current: str | None):
     return jobs_table(jobs), gr.update(choices=choices, value=value)
 
 
-def on_pick_scene(job_id: str | None) -> str:
+def _versions(job_id: str | None):
     job = JOBS.get(job_id) if job_id else None
-    return scene_html(STORE, job.scene_path if job and job.status == "done" else None)
+    if not job or job.status != "done":
+        return []
+    return list_versions(STORE, job_id, v1_created_at=job.finished_at)
+
+
+def _version(job_id: str | None, number: int | None):
+    return next((v for v in _versions(job_id) if v.number == number), None)
+
+
+def on_pick_scene(job_id: str | None):
+    """Show the newest version of the picked scene and list all its versions."""
+    versions = _versions(job_id)
+    choices = [(v.label(), v.number) for v in versions]
+    latest = versions[0] if versions else None
+    return (
+        gr.update(choices=choices, value=latest.number if latest else None),
+        scene_html(STORE, latest.path if latest else None),
+        gr.update(value=None, visible=False),
+    )
+
+
+def on_pick_version(job_id: str | None, number: int | None):
+    version = _version(job_id, number)
+    return scene_html(STORE, version.path if version else None), gr.update(
+        value=None, visible=False
+    )
+
+
+def on_download(job_id: str | None, number: int | None, kind: str):
+    version = _version(job_id, number)
+    if version is None:
+        raise gr.Error("Pick a scene version first.")
+    try:
+        path = download_file(STORE, version, kind)
+    except Exception as e:
+        raise gr.Error(f"The file could not be fetched ({type(e).__name__}).") from e
+    if path is None:
+        raise gr.Error(f"Version v{version.number} has no .{kind} file.")
+    return gr.update(value=str(path), visible=True)
 
 
 def on_create(files: list[str] | None):
@@ -112,14 +151,22 @@ def build() -> gr.Blocks:
 
         gr.Markdown("## Scene")
         picker = gr.Dropdown(label="Finished scene", choices=[], value=None)
+        version = gr.Radio(label="Version (newest first)", choices=[], value=None)
         viewer = gr.HTML(scene_html(STORE, None))
+        with gr.Row():
+            get_ply = gr.Button("Download .ply")
+            get_splat = gr.Button("Download .splat (compressed)")
+        download = gr.File(label="Download", visible=False, interactive=False)
 
         files.change(on_upload, files, [message, create])
         create.click(on_create, files, [message, table])
         refresh.click(refresh_all, picker, [table, picker])
         gr.Timer(10).tick(refresh_all, picker, [table, picker])
         demo.load(refresh_all, picker, [table, picker])
-        picker.input(on_pick_scene, picker, viewer)
+        picker.input(on_pick_scene, picker, [version, viewer, download])
+        version.input(on_pick_version, [picker, version], [viewer, download])
+        get_ply.click(lambda j, n: on_download(j, n, "ply"), [picker, version], download)
+        get_splat.click(lambda j, n: on_download(j, n, "splat"), [picker, version], download)
     return demo
 
 

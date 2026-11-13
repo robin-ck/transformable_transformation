@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from splat_studio import modal_client
-from splat_studio.space import jobs, validation, viewer
+from splat_studio.space import jobs, validation, versions, viewer
 from splat_studio.space.validation import UploadError, validate_upload
 
 # --- upload validation (task 3.1) ---------------------------------------------
@@ -283,3 +283,71 @@ def test_scene_html_reports_fetch_error() -> None:
             raise ConnectionError("offline")
 
     assert "could not be fetched (ConnectionError)" in viewer.scene_html(Broken(), "scenes/x/v1")
+
+
+# --- scene versions and download (task 3.4) ---------------------------------------
+
+
+def _scene_files(tmp_path: Path, tag: str) -> dict[str, Path]:
+    out = {}
+    for kind in versions.FILES:
+        p = tmp_path / f"{tag}.{kind}"
+        p.write_bytes(tag.encode() * 4)
+        out[kind] = p
+    return out
+
+
+def test_versions_list_newest_first_with_v1_fallback(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path / "store")
+    assert versions.list_versions(store, "j1") == []
+    store.upload_files({"scenes/j1/v1/scene.splat": _scene_files(tmp_path, "a")["splat"]})
+    (tmp_path / "store/scenes/j1/notes").mkdir()  # not a version folder
+    v2 = versions.add_version(
+        store, "j1", _scene_files(tmp_path, "b"),
+        mode="edit_scene", prompt="make the façade green", model="m", parent=1, now=2e9,
+    )  # fmt: skip
+    v3 = versions.add_version(store, "j1", _scene_files(tmp_path, "c"), mode="add_object", now=3e9)
+    assert (v2.number, v3.number) == (2, 3)
+    listed = versions.list_versions(store, "j1", v1_created_at=1e9)
+    assert [v.number for v in listed] == [3, 2, 1]
+    assert listed[1] == v2 and listed[2].created_at == 1e9 and listed[2].mode == "reconstruction"
+    assert listed[1].label() == 'v2 · 2033-05-18 03:33 UTC · edit scene: "make the façade green"'
+    assert "date unknown" in versions.list_versions(store, "j1")[2].label()
+
+
+def test_versions_sort_numerically(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path)
+    for n in (1, 2, 10):
+        (tmp_path / f"scenes/j1/v{n}").mkdir(parents=True)
+    assert [v.number for v in versions.list_versions(store, "j1")] == [10, 2, 1]
+    assert versions.add_version(store, "j1", {}, mode="edit_scene").number == 11
+
+
+def test_switching_back_keeps_later_versions(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path / "store")
+    for tag in "abcd":
+        versions.add_version(store, "j1", _scene_files(tmp_path, tag), mode="edit_scene")
+    v2 = next(v for v in versions.list_versions(store, "j1") if v.number == 2)
+    assert "scenes/j1/v2/scene.splat" in viewer.scene_html(store, v2.path)
+    assert [v.number for v in versions.list_versions(store, "j1")] == [4, 3, 2, 1]
+    assert (tmp_path / "store/scenes/j1/v4/scene.ply").read_bytes() == b"dddd"
+
+
+def test_add_version_rejects_unknown_kind(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown file kinds"):
+        versions.add_version(jobs.LocalStore(tmp_path), "j1", {"obj": tmp_path}, mode="x")
+
+
+def test_download_file_named_per_version(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path / "store")
+    for tag in "ab":
+        versions.add_version(store, "j1", _scene_files(tmp_path, tag), mode="edit_scene")
+    [v2, v1] = versions.list_versions(store, "j1")
+    p2 = versions.download_file(store, v2, "ply")
+    p1 = versions.download_file(store, v1, "ply")
+    assert p2.name == "j1-v2.ply" and p2.read_bytes() == b"bbbb"
+    assert p1.name == "j1-v1.ply" and p1.read_bytes() == b"aaaa"
+    assert versions.download_file(store, v2, "ply") == p2  # reused
+    assert p2.parent == tmp_path / "store/downloads"
+    missing = versions.Version("j9", 1)
+    assert versions.download_file(store, missing, "splat") is None
