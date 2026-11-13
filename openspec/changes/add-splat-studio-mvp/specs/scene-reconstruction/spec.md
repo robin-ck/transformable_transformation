@@ -14,7 +14,7 @@ The system SHALL accept either one video (MP4/MOV, ≤ 2 min, ≤ 500 MB) or 20 
 - **THEN** the system rejects the upload and states that at least 20 photos are needed
 
 ### Requirement: Remote reconstruction job
-The system SHALL run reconstruction (frame extraction, camera pose estimation, Gaussian splat training) as a job on a Kaggle GPU and SHALL return a `.ply` scene plus a viewer-ready compressed file.
+The system SHALL run reconstruction (frame extraction, camera pose estimation, Gaussian splat training) as a job on a remote GPU and SHALL return a `.ply` scene plus a viewer-ready compressed file.
 
 #### Scenario: Successful reconstruction
 - **WHEN** the user clicks "Create scene" on a valid upload
