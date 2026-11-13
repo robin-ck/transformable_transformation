@@ -31,6 +31,7 @@ class Store(Protocol):
     def write_json(self, path: str, data: dict) -> None: ...
     def read_json(self, path: str) -> dict | None: ...
     def list_dirs(self, prefix: str) -> list[str]: ...
+    def download(self, path: str) -> Path | None: ...
 
 
 class LocalStore:
@@ -58,15 +59,27 @@ class LocalStore:
         base = self.root / prefix
         return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
 
+    def download(self, path: str) -> Path | None:
+        target = self.root / path
+        return target if target.is_file() else None
+
+    @property
+    def file_dir(self) -> Path:
+        """Folder that holds downloaded files (for Gradio's `allowed_paths`)."""
+        return self.root
+
 
 class HubStore:
     """Store in a private HF Hub dataset repo (needs HF_TOKEN with write access)."""
 
-    def __init__(self, repo_id: str, token: str | None = None) -> None:
+    def __init__(
+        self, repo_id: str, token: str | None = None, cache_dir: Path = Path("scene_cache")
+    ) -> None:
         from huggingface_hub import HfApi
 
         self.repo_id = repo_id
         self.api = HfApi(token=token)
+        self.file_dir = Path(cache_dir)
 
     def upload_files(self, files: dict[str, Path], message: str = "") -> None:
         from huggingface_hub import CommitOperationAdd
@@ -105,6 +118,20 @@ class HubStore:
             return sorted(e.path.rsplit("/", 1)[-1] for e in tree if isinstance(e, RepoFolder))
         except EntryNotFoundError:
             return []
+
+    def download(self, path: str) -> Path | None:
+        """Local copy of a repo file. Scene versions never change, so a cached copy is reused."""
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError
+
+        try:
+            local = hf_hub_download(
+                self.repo_id, path, repo_type="dataset", token=self.api.token,
+                local_dir=self.file_dir,
+            )  # fmt: skip
+        except EntryNotFoundError:
+            return None
+        return Path(local)
 
 
 @dataclass
