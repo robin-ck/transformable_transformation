@@ -23,11 +23,18 @@ def spawn(function_name: str, *args: Any, **kwargs: Any) -> str:
 
 
 def poll(call_id: str) -> tuple[str, dict | None]:
-    """Return ("running", None) or ("finished", result) without blocking."""
+    """Return ("running", None) or ("finished", result) without blocking.
+
+    Errors from the job itself (including a hit runtime cap, FunctionTimeoutError) are raised.
+    """
     modal = _modal()
     call = modal.FunctionCall.from_id(call_id)
+    # FunctionTimeoutError subclasses modal's TimeoutError, so it must be re-raised first.
+    function_timeout = getattr(modal.exception, "FunctionTimeoutError", ())
     try:
         return "finished", call.get(timeout=0)
+    except function_timeout:
+        raise
     except (TimeoutError, modal.exception.TimeoutError):
         return "running", None
 

@@ -75,6 +75,27 @@ modal deploy modal_app/app.py
 
 Reconstruction reads inputs from `jobs/<job_id>/input/` in the dataset and writes `scenes/<job_id>/v1/scene.ply`, `scene.splat` and a run log with stage timings and estimated cost to `jobs/<job_id>/run.json`. GPU prices in `reconstruction/cost.py` are approximate; check modal.com/pricing.
 
+## Space (Gradio UI)
+
+The Space lives in `space/`; the logic it uses is in `src/splat_studio/space/`.
+
+Run it locally (needs `pip install "gradio>=5,<6" huggingface_hub modal`):
+
+```bash
+python space/app.py
+```
+
+With `SPLAT_STUDIO_DATASET` and `HF_TOKEN` set, jobs are stored in the HF dataset; without them, in `./local_data` (UI work only, since the Modal job reads its inputs from HF Hub).
+
+Deploy to a Hugging Face Space (Gradio SDK) by uploading `space/` as the Space root and the package next to it:
+
+```bash
+hf upload <you>/splat-studio space/ . --repo-type space
+hf upload <you>/splat-studio src/splat_studio splat_studio --repo-type space
+```
+
+Then add the four secrets (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `HF_TOKEN`, `SPLAT_STUDIO_DATASET`) in the Space settings, and make sure `modal deploy modal_app/app.py` has been run.
+
 ## Licence
 
 Apache-2.0, see `LICENSE`. Third-party models used by the project keep their own licences.

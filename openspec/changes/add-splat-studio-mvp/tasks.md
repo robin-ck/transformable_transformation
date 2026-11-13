@@ -18,8 +18,13 @@
   - open: needs a Modal account (not reachable from the dev sandbox)
 
 ## 3. Space and viewer
-- [ ] 3.1 Gradio Space with upload + validation (unit tests for limits)
-- [ ] 3.2 Job client: spawn Modal job, poll, store results on HF Hub (unit tests with mocked Modal calls)
+- [x] 3.1 Gradio Space with upload + validation (unit tests for limits)
+  - `space/app.py` + `splat_studio/space/validation.py`. Smoke-tested locally with Gradio 5.50
+    (8 photos rejected, 20 accepted). Not yet deployed to a Space.
+- [x] 3.2 Job client: spawn Modal job, poll, store results on HF Hub (unit tests with mocked Modal calls)
+  - `splat_studio/space/jobs.py`: job state in `jobs/<id>/job.json`, queued/running from the
+    worker's `run.json`, Modal function timeout mapped to the timeout message.
+  - open: not yet run against real Modal + HF Hub (do together with 2.4)
 - [ ] 3.3 Embed JS splat viewer; orbit/pan/zoom/reset
 - [ ] 3.4 Versions list, switch, download
 
