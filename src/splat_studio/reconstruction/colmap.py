@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import struct
 import subprocess
 from pathlib import Path
@@ -9,6 +10,12 @@ from pathlib import Path
 from . import errors
 
 MIN_REGISTERED_RATIO = 0.5
+# Mapper log lines that mean "the footage did not reconstruct", as opposed to a crash.
+POSE_FAILURE_MARKERS = (
+    "No good initial image pair found",
+    "failed to create sparse model",
+    "Failed to create sparse model",
+)
 
 
 def commands(data_dir: Path, sequential: bool) -> list[list[str]]:
@@ -45,11 +52,11 @@ def best_model(sparse_dir: Path) -> tuple[Path | None, int]:
     return best, best_n
 
 
-def check_model(sparse_dir: Path, total_images: int) -> Path:
+def check_model(sparse_dir: Path, total_images: int, log: str = "") -> Path:
     """Return the best model dir, or raise a readable error."""
     model, n = best_model(sparse_dir)
     if model is None:
-        raise errors.no_poses()
+        raise errors.no_poses(log)
     if n < MIN_REGISTERED_RATIO * total_images:
         raise errors.low_registration(n, total_images, MIN_REGISTERED_RATIO)
     return model
@@ -65,15 +72,27 @@ def normalise_layout(sparse_dir: Path, model: Path) -> None:
     model.rename(target)
 
 
+def is_pose_failure(log: str) -> bool:
+    """True if the mapper log says the footage could not be reconstructed (not a crash)."""
+    return any(m in log for m in POSE_FAILURE_MARKERS)
+
+
 def run(data_dir: Path, sequential: bool) -> Path:
     """Run COLMAP and return the model dir used for training."""
-    for cmd in commands(data_dir, sequential):
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0 and cmd[1] == "mapper":
-            raise errors.no_poses()
-        res.check_returncode()
-    total = len(list((data_dir / "images").iterdir()))
     sparse = data_dir / "sparse"
-    model = check_model(sparse, total)
+    sparse.mkdir(parents=True, exist_ok=True)  # mapper exits with an error if it is missing
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}  # no display in the container
+    mapper_log = ""
+    for cmd in commands(data_dir, sequential):
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        log = f"$ {' '.join(cmd[:2])}\n{res.stdout[-1000:]}\n{res.stderr[-3000:]}"
+        if cmd[1] == "mapper":
+            mapper_log = log
+        if res.returncode != 0:
+            if cmd[1] == "mapper" and is_pose_failure(log):
+                raise errors.no_poses(log)
+            raise errors.pose_tool_failed(cmd[1], log)
+    total = len(list((data_dir / "images").iterdir()))
+    model = check_model(sparse, total, mapper_log)
     normalise_layout(sparse, model)
     return sparse / "0"

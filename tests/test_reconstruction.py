@@ -196,3 +196,49 @@ def test_extract_frames_real_video(tmp_path: Path) -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()  # fmt: skip
     assert out == "1600,800"
+
+
+# --- colmap runner (fake subprocess) -------------------------------------------
+
+
+def _fake_colmap(monkeypatch: pytest.MonkeyPatch, mapper_rc: int, mapper_err: str, n_reg: int):
+    def fake_run(cmd, capture_output, text, env):
+        assert env["QT_QPA_PLATFORM"] == "offscreen"
+        if cmd[1] == "mapper":
+            out = Path(cmd[cmd.index("--output_path") + 1])
+            assert out.is_dir(), "mapper needs an existing output dir"
+            if n_reg:
+                _model(out / "0", n_reg)
+            return subprocess.CompletedProcess(cmd, mapper_rc, "", mapper_err)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(colmap.subprocess, "run", fake_run)
+
+
+def _images(tmp_path: Path, n: int) -> Path:
+    (tmp_path / "images").mkdir()
+    for i in range(n):
+        (tmp_path / "images" / f"{i:05d}.jpg").write_bytes(b"x")
+    return tmp_path
+
+
+def test_colmap_run_creates_sparse_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_colmap(monkeypatch, 0, "", 25)
+    assert colmap.run(_images(tmp_path, 30), sequential=True) == tmp_path / "sparse" / "0"
+
+
+def test_colmap_crash_is_not_blamed_on_footage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_colmap(monkeypatch, 1, "ERROR: `output_path` is not a directory", 0)
+    with pytest.raises(errors.ReconstructionError) as e:
+        colmap.run(_images(tmp_path, 30), sequential=True)
+    assert e.value.code == "pose_tool_failed"
+    assert "output_path" in e.value.to_dict()["detail"]
+
+
+def test_colmap_bad_footage_keeps_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_colmap(monkeypatch, 1, "No good initial image pair found.", 0)
+    with pytest.raises(errors.ReconstructionError) as e:
+        colmap.run(_images(tmp_path, 30), sequential=True)
+    assert e.value.code == "pose_failed" and "initial image pair" in e.value.detail
