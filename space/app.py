@@ -18,9 +18,12 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio.editing.objects import Placement  # noqa: E402
+from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
+from splat_studio.space import prompt_log  # noqa: E402
 from splat_studio.space.add_object import PlaceError, place_object, start_placement  # noqa: E402
 from splat_studio.space.jobs import (  # noqa: E402
     OBJECT_TIMEOUT_S,
+    PREVIEW_TIMEOUT_S,
     HubStore,
     Job,
     JobManager,
@@ -49,6 +52,7 @@ DATASET = os.environ.get("SPLAT_STUDIO_DATASET")
 STORE = HubStore(DATASET, os.environ.get("HF_TOKEN")) if DATASET else LocalStore(Path("local_data"))
 JOBS = JobManager(STORE)
 OBJECTS = JobManager(STORE, prefix="objects", timeout_s=OBJECT_TIMEOUT_S)
+PREVIEWS = JobManager(STORE, prefix="previews", timeout_s=PREVIEW_TIMEOUT_S)
 STATUS_LABEL = {
     "queued": "⏳ queued",
     "running": "⚙️ running",
@@ -115,6 +119,16 @@ def _end_placement(obj_job: str | None, placing: bool):
     and its object is shown on whichever version is picked when it is done.
     """
     return gr.update(visible=False), False, (None if placing else obj_job)
+
+
+def log_outputs(job_id: str | None, number: int | None):
+    """History of the shown version and the scene's prompt log (task 4.5)."""
+    versions = _versions(job_id)
+    if not versions:
+        return "", gr.update(value=[])
+    previews = [j for j in PREVIEWS.list(refresh=False) if j.kind == "preview"]
+    rows = [e.row() for e in prompt_log.scene_log(job_id, versions, previews)]
+    return prompt_log.history_markdown(versions, number), gr.update(value=rows)
 
 
 def on_pick_scene(job_id: str | None, obj_job: str | None, placing: bool):
@@ -246,6 +260,89 @@ def on_cancel(scene_id, number):
     )
 
 
+# --- preview (task 4.3) --------------------------------------------------------------
+
+# Asks the viewer iframe for its camera and passes it on as the first input (JSON).
+# Gradio hands the js hook the input values followed by the output values, so the
+# camera goes first and everything else is passed through unchanged.
+GET_CAMERA_JS = """async (...args) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  let camera = "";
+  if (f && f.contentWindow) {
+    const id = Math.random().toString(36).slice(2);
+    camera = await new Promise((resolve) => {
+      const on = (e) => {
+        const d = e.data;
+        if (d && d.type === "camera" && d.id === id) { done(JSON.stringify(d)); }
+      };
+      const done = (v) => { window.removeEventListener("message", on); resolve(v); };
+      window.addEventListener("message", on);
+      f.contentWindow.postMessage({type: "get_camera", id}, "*");
+      setTimeout(() => done(""), 3000);
+    });
+  }
+  return [camera, ...args.slice(1)];
+}"""
+
+
+def on_preview(camera_json, scene_id, number, prompt, strength, seed, placing):
+    version = _version(scene_id, number)
+    if version is None:
+        raise gr.Error("Pick a finished scene first.")
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise gr.Error("Describe the look first, e.g. 'same street in autumn with rain gardens'.")
+    try:
+        camera = camera_from_viewer(camera_json)
+    except CameraError as e:
+        raise gr.Error(str(e)) from e
+    job = PREVIEWS.create_preview(
+        prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
+    )
+    if job.status == "failed":
+        return f"**Could not start.** {job.error['message']}", None
+    note = " The object being placed is not part of it." if placing else ""
+    return (
+        f"⚙️ Rendering this view of v{version.number} and restyling it (job {job.job_id}).{note}",
+        job.job_id,
+    )
+
+
+def on_preview_tick(preview_job: str | None):
+    """Poll the preview job. Outputs: status, preview_job, column, preview, render."""
+    rest = [gr.skip()] * 3
+    if not preview_job:
+        return [gr.skip(), gr.skip(), *rest]
+    job = PREVIEWS.get(preview_job)
+    job = PREVIEWS.refresh(job) if job else None
+    if job is None:
+        return ["The preview job was not found.", None, *rest]
+    if job.status == "failed":
+        err = job.error or {}
+        msg = f"❌ **Preview failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        return [msg, None, *rest]
+    if job.status != "done":
+        label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
+        elapsed = format_elapsed(job.elapsed(PREVIEWS.clock()))
+        return [f"{label}: **{job.summary}** ({elapsed})", gr.skip(), *rest]
+    try:
+        styled = STORE.download(f"{job.scene_path}/preview.png")
+        render = STORE.download(f"{job.scene_path}/render.png")
+    except Exception as e:
+        return [f"**The preview could not be fetched** ({type(e).__name__}).", None, *rest]
+    if styled is None:
+        return ["**The preview image is missing.**", None, *rest]
+    seconds = job.run.get("seconds")
+    took = f" in {format_elapsed(seconds)}" if seconds else ""
+    return [
+        f"✅ Preview of **{job.summary}** ready{took}. The scene is unchanged.",
+        None,
+        gr.update(visible=True),
+        str(styled),
+        str(render) if render else None,
+    ]
+
+
 def on_download(job_id: str | None, number: int | None, kind: str):
     version = _version(job_id, number)
     if version is None:
@@ -289,7 +386,17 @@ def build() -> gr.Blocks:
         gr.Markdown("## Scene")
         picker = gr.Dropdown(label="Finished scene", choices=[], value=None)
         version = gr.Radio(label="Version (newest first)", choices=[], value=None)
-        viewer = gr.HTML(scene_html(STORE, None))
+        history = gr.Markdown()
+        with gr.Accordion("Prompt log (every prompt, model and result for this scene)", open=False):
+            log_table = gr.Dataframe(headers=prompt_log.COLUMNS, interactive=False, wrap=True)
+        with gr.Row():
+            with gr.Column(scale=3):
+                viewer = gr.HTML(scene_html(STORE, None))
+            with gr.Column(scale=2, visible=False) as preview_col:
+                preview_img = gr.Image(
+                    label="Preview (download with the arrow)", interactive=False, format="png"
+                )
+                render_img = gr.Image(label="Rendered view it started from", interactive=False)
         with gr.Row():
             get_ply = gr.Button("Download .ply")
             get_splat = gr.Button("Download .splat (compressed)")
@@ -316,16 +423,35 @@ def build() -> gr.Blocks:
                 place_cancel = gr.Button("Cancel")
         sliders = [px, py, pz, pturn, psize]
 
+        gr.Markdown(
+            "## Preview\nRestyle the current view as a 2D image. Aim the camera first; "
+            "the scene is not changed."
+        )
+        preview_job = gr.State(None)
+        camera_json = gr.Textbox(visible=False)
+        with gr.Row():
+            pv_prompt = gr.Textbox(
+                label="Look", placeholder="same street in autumn with rain gardens", scale=4
+            )
+            pv_strength = gr.Slider(
+                0.3, 0.95, value=0.7, step=0.05, label="Change (low keeps more)", scale=2
+            )
+            pv_seed = gr.Number(label="Seed", value=0, precision=0, scale=1)
+        pv_go = gr.Button("Preview this view")
+        pv_status = gr.Markdown()
+
         files.change(on_upload, files, [message, create])
         create.click(on_create, files, [message, table])
         refresh.click(refresh_all, picker, [table, picker])
         gr.Timer(10).tick(refresh_all, picker, [table, picker])
         demo.load(refresh_all, picker, [table, picker])
         end = [place_group, placing, obj_job]
-        picker.input(on_pick_scene, [picker, obj_job, placing], [version, viewer, download, *end])
+        picker.input(
+            on_pick_scene, [picker, obj_job, placing], [version, viewer, download, *end]
+        ).then(log_outputs, [picker, version], [history, log_table])
         version.input(
             on_pick_version, [picker, version, obj_job, placing], [viewer, download, *end]
-        )
+        ).then(log_outputs, [picker, version], [history, log_table])
         obj_go.click(
             on_generate,
             [picker, version, obj_prompt, obj_seed],
@@ -342,10 +468,23 @@ def build() -> gr.Blocks:
             on_place,
             [picker, version, obj_job, *sliders],
             [obj_status, version, viewer, place_group, placing, obj_job],
-        )
+        ).then(log_outputs, [picker, version], [history, log_table])
         place_cancel.click(
             on_cancel, [picker, version], [obj_status, viewer, place_group, placing, obj_job]
         )
+        pv_go.click(
+            on_preview,
+            [camera_json, picker, version, pv_prompt, pv_strength, pv_seed, placing],
+            [pv_status, preview_job],
+            js=GET_CAMERA_JS,
+        )
+        gr.Timer(5).tick(
+            on_preview_tick,
+            preview_job,
+            [pv_status, preview_job, preview_col, preview_img, render_img],
+        )
+        # A started or finished preview adds a line to the prompt log.
+        pv_status.change(log_outputs, [picker, version], [history, log_table])
         get_ply.click(lambda j, n: on_download(j, n, "ply"), [picker, version], download)
         get_splat.click(lambda j, n: on_download(j, n, "splat"), [picker, version], download)
     return demo

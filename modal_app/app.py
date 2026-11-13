@@ -24,7 +24,7 @@ TRAIN_GPU = "A10G"
 TRAIN_TIMEOUT_S = 60 * 60  # hard cap per job to protect the monthly credit
 CPU_CORES = 4.0
 
-image = (
+gsplat_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0")
     .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
@@ -45,8 +45,8 @@ image = (
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
         f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
     )
-    .add_local_python_source("splat_studio")
 )
+image = gsplat_image.add_local_python_source("splat_studio")
 
 # Add object (task 4.2): FLUX.1-schnell makes a reference image, TRELLIS turns it into
 # Gaussians. FLUX's transformer alone is 24 GB in bf16, so this runs on an L40S (48 GB).
@@ -107,6 +107,24 @@ object_image = (
             "U2NET_HOME": f"{MODELS_DIR}/u2net",
         }
     )
+    .add_local_python_source("splat_studio")
+)
+
+# Preview (task 4.3): gsplat renders the viewer's view (colour + depth), SDXL img2img with
+# a depth ControlNet restyles it. Reuses the gsplat build; SDXL + ControlNet in fp16 need
+# about 10 GB, so an L4 (24 GB) is enough.
+PREVIEW_GPU = "L4"
+PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with splat_studio/space/jobs.py
+
+preview_image = (
+    gsplat_image.pip_install(
+        "diffusers==0.31.0",
+        "transformers==4.46.3",
+        "accelerate==1.1.1",
+        "safetensors",
+        "pillow",
+    )
+    .env({"HF_HOME": f"{MODELS_DIR}/hf"})
     .add_local_python_source("splat_studio")
 )
 
@@ -380,6 +398,173 @@ def generate_object(
         import traceback
 
         err = errors.object_failed(repr(e))
+        err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
+        result = log.finish("failed", err.to_dict()).to_dict()
+
+    _upload_json(api, repo, f"{prefix}/run.json", result)
+    print(json.dumps(result))
+    return result
+
+
+PREVIEW_NEGATIVE = "blurry, low quality, distorted, deformed, oversaturated, text, watermark"
+VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of the view
+
+
+@app.function(
+    image=preview_image,
+    gpu=PREVIEW_GPU,
+    timeout=PREVIEW_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+)
+def render_preview(
+    job_id: str,
+    scene_path: str,
+    camera: dict,
+    prompt: str,
+    seed: int = 0,
+    strength: float = 0.7,
+    control_scale: float = 0.6,
+    steps: int = 30,
+) -> dict:
+    """Render the scene from `camera` and restyle it; uploads to previews/<job_id>/.
+
+    `camera` is `editing.preview.ViewCamera.to_dict()` (the viewer's camera).
+    Writes render.png (plain view), depth.png (control image) and preview.png.
+    """
+    t = time.time()
+    import numpy as np
+    import torch
+    from huggingface_hub import HfApi, hf_hub_download
+    from PIL import Image
+
+    from splat_studio import models
+    from splat_studio.editing import preview
+    from splat_studio.reconstruction import errors
+    from splat_studio.reconstruction.cost import RunLog
+
+    repo = os.environ["SPLAT_STUDIO_DATASET"]
+    api = HfApi()
+    prefix = f"previews/{job_id}"
+    log = RunLog(job_id=job_id, gpu=PREVIEW_GPU)
+    log.stage("imports", time.time() - t)
+    _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+    model_label = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
+
+    try:
+        cam = preview.ViewCamera.from_dict(camera)
+        width, height = preview.output_size(cam.aspect)
+
+        t = time.time()
+        splat_file = hf_hub_download(repo, f"{scene_path}/scene.splat", repo_type="dataset")
+        g = preview.read_splat(Path(splat_file).read_bytes())
+        log.stage("download_scene", time.time() - t)
+
+        t = time.time()
+        from gsplat import rasterization
+
+        def tensor(a):
+            return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float32, device="cuda")
+
+        # RGB+ED renders colour plus expected depth. The background is blended in below:
+        # gsplat pads the channel count internally, so its `backgrounds` argument does
+        # not fit this mode.
+        with torch.no_grad():
+            colors, alphas, _ = rasterization(
+                means=tensor(g.means),
+                quats=tensor(g.quats),
+                scales=tensor(g.scales),
+                opacities=tensor(g.opacities),
+                colors=tensor(g.colors),
+                viewmats=tensor(preview.viewmat(cam))[None],
+                Ks=tensor(preview.intrinsics(cam, width, height))[None],
+                width=width,
+                height=height,
+                render_mode="RGB+ED",
+            )
+        depth = colors[0, ..., 3].cpu().numpy()
+        alpha = alphas[0, ..., 0].cpu().numpy()
+        bg = np.array(VIEWER_BACKGROUND, dtype=np.float32) / 255
+        rgb = colors[0, ..., :3].cpu().numpy() + (1 - alpha[..., None]) * bg
+        rgb = np.clip(rgb, 0, 1)
+        del colors, alphas
+        torch.cuda.empty_cache()
+        render = Image.fromarray((rgb * 255).round().astype(np.uint8))
+        control = Image.fromarray(preview.depth_to_control(depth, alpha)).convert("RGB")
+        log.stage("render", time.time() - t)
+        if (alpha >= preview.MIN_ALPHA).mean() < 0.05:
+            raise errors.preview_empty()
+
+        t = time.time()
+        from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline
+
+        controlnet = ControlNetModel.from_pretrained(
+            models.PREVIEW_DEPTH.repo_id,
+            revision=models.PREVIEW_DEPTH.revision,
+            variant="fp16",
+            use_safetensors=True,
+            torch_dtype=torch.float16,
+        )
+        pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+            models.PREVIEW_BASE.repo_id,
+            revision=models.PREVIEW_BASE.revision,
+            controlnet=controlnet,
+            variant="fp16",
+            use_safetensors=True,
+            torch_dtype=torch.float16,
+        ).to("cuda")
+        models_volume.commit()  # keep downloaded weights for the next run
+        log.stage("load_models", time.time() - t)
+
+        t = time.time()
+        styled = pipe(
+            prompt=prompt.strip(),
+            negative_prompt=PREVIEW_NEGATIVE,
+            image=render,
+            control_image=control,
+            strength=float(strength),
+            controlnet_conditioning_scale=float(control_scale),
+            num_inference_steps=int(steps),
+            guidance_scale=7.0,
+            width=width,
+            height=height,
+            generator=torch.Generator("cpu").manual_seed(int(seed)),
+        ).images[0]
+        log.stage("restyle", time.time() - t)
+
+        t = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            images = {"render.png": render, "depth.png": control, "preview.png": styled}
+            for name, img in images.items():
+                img.save(Path(tmp) / name)
+                api.upload_file(
+                    path_or_fileobj=str(Path(tmp) / name),
+                    path_in_repo=f"{prefix}/{name}",
+                    repo_id=repo,
+                    repo_type="dataset",
+                )
+        log.stage("upload", time.time() - t)
+        log.finish("done")
+        result = {
+            **log.to_dict(),
+            "scene_path": prefix,
+            "source_scene": scene_path,
+            "model": model_label,
+            "prompt": prompt,
+            "seed": seed,
+            "strength": strength,
+            "control_scale": control_scale,
+            "steps": steps,
+            "size": [width, height],
+            "num_gaussians": len(g),
+        }
+    except errors.ReconstructionError as e:
+        result = log.finish("failed", e.to_dict()).to_dict()
+    except Exception as e:
+        import traceback
+
+        err = errors.preview_failed(repr(e))
         err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
         result = log.finish("failed", err.to_dict()).to_dict()
 

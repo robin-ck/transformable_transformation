@@ -45,3 +45,9 @@ def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
 
 def submit_object(job_id: str, prompt: str, seed: int = 0) -> str:
     return spawn("generate_object", job_id, prompt, seed=seed)
+
+
+def submit_preview(
+    job_id: str, scene_path: str, camera: dict, prompt: str, seed: int = 0, strength: float = 0.7
+) -> str:
+    return spawn("render_preview", job_id, scene_path, camera, prompt, seed=seed, strength=strength)

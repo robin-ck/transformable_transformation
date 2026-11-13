@@ -14,6 +14,10 @@ Placement mode (task 4.2): a second `.splat` (a generated object) is loaded next
 the scene with its own position, turn and size. The page listens for
 `{type: "placement", x, y, z, turn, size}` messages from the Space and moves the
 object live, so dragging a slider does not reload the scene.
+
+Preview (task 4.3): on `{type: "get_camera", id}` the page replies to the sender with
+`{type: "camera", id, matrix, fov, aspect}` (Three.js camera-to-world, column-major),
+so the Modal job can render exactly the view on screen.
 """
 
 from __future__ import annotations
@@ -177,6 +181,14 @@ try {
   };
   document.getElementById("reset").addEventListener("click", reset);
   window.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R") reset(); });
+  // Preview (task 4.3): the Space asks for the current camera to render the same view.
+  window.addEventListener("message", (e) => {
+    const d = e.data, c = viewer.camera;
+    if (!d || d.type !== "get_camera" || !c || !e.source) return;
+    c.updateMatrixWorld();
+    e.source.postMessage({ type: "camera", id: d.id, matrix: Array.from(c.matrixWorld.elements),
+      fov: c.fov, aspect: c.aspect }, "*");
+  });
   if (cfg.object) {
     const o = cfg.object;
     await viewer.addSplatScenes([
