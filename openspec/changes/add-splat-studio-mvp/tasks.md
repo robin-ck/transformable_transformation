@@ -92,7 +92,18 @@
     SPLAT_STUDIO_DATASET. open: not yet tried from the Space against HF Hub.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
-- [ ] 4.5 Prompt log per version
+- [x] 4.5 Prompt log per version
+  - `splat_studio/space/prompt_log.py` reads what is already stored: each version's
+    `version.json` (prompt, mode, model, parent, date) and each preview's `job.json`.
+    Nothing new is written. Preview jobs record their planned model at creation, so failed
+    previews still show it.
+  - Space: under the version list, "History of vN" lists the chain of edits that led to the
+    shown version (follows `parent`), with prompt and model of each step. A "Prompt log"
+    panel lists every prompt for the scene, newest first: versions and previews (with source
+    version and failed/running state). It is refreshed after picking a scene or version,
+    placing an object, and when a preview starts or finishes.
+  - 2026-11-13: checked locally against HF Hub: v1 history and the two failed preview
+    attempts from 4.3 show with prompt and source version.
 
 ## 5. Wrap-up
 - [ ] 5.1 End-to-end test: upload → scene → add object → edit → preview

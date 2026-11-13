@@ -92,6 +92,22 @@ def object_failed(detail: str) -> ReconstructionError:
     )
 
 
+def preview_failed(detail: str) -> ReconstructionError:
+    return ReconstructionError(
+        "preview_failed",
+        "Making the preview failed on the GPU. Please try again.",
+        f"Technical detail: {detail[-300:]}" if detail else "",
+    )
+
+
+def preview_empty() -> ReconstructionError:
+    return ReconstructionError(
+        "preview_empty",
+        "The current view shows almost nothing of the scene.",
+        "Tip: turn the camera towards the scene (or press Reset view) and try again.",
+    )
+
+
 def model_access(repo_id: str, detail: str = "") -> ReconstructionError:
     """A gated model could not be downloaded with the configured HF token."""
     return ReconstructionError(

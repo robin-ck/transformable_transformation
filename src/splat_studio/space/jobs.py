@@ -7,6 +7,8 @@ State lives in the dataset repo, so a job survives the user closing the page:
   scenes/<job_id>/v1/...    finished scene
 Object jobs (task 4.2) use the same layout under `objects/<job_id>/`, with the
 generated object in `object.ply`, `object.splat` and `reference.png`.
+Preview jobs (task 4.3) live under `previews/<job_id>/` with `render.png`, `depth.png`
+and `preview.png`; they never write to `scenes/`.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Protocol
 
-from splat_studio import modal_client
+from splat_studio import modal_client, models
 from splat_studio.reconstruction import errors
 
 from .validation import ValidUpload
@@ -27,6 +29,7 @@ from .validation import ValidUpload
 FINAL = {"done", "failed"}
 TRAIN_TIMEOUT_S = 60 * 60  # keep in sync with modal_app/app.py
 OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
+PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
 
 
 class Store(Protocol):
@@ -220,6 +223,28 @@ class JobManager:
         self._save(job)
         return self._start(job, lambda: self.client.submit_object(job.job_id, prompt, seed=seed))
 
+    def create_preview(
+        self,
+        prompt: str,
+        scene_path: str,
+        camera: dict,
+        seed: int = 0,
+        strength: float = 0.7,
+    ) -> Job:
+        """Record a preview job (a 2D restyle of one view) and start it on Modal."""
+        now = self.clock()
+        job = Job(new_job_id(now), "preview", " ".join(prompt.split())[:80], now)
+        model = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
+        job.params = {"prompt": prompt, "seed": seed, "strength": strength,
+                      "scene_path": scene_path, "camera": camera, "model": model}  # fmt: skip
+        self._save(job)
+        return self._start(
+            job,
+            lambda: self.client.submit_preview(
+                job.job_id, scene_path, camera, prompt, seed=seed, strength=strength
+            ),
+        )
+
     def get(self, job_id: str) -> Job | None:
         data = self.store.read_json(f"{self.prefix}/{job_id}/job.json")
         return Job.from_dict(data) if data else None
@@ -240,7 +265,9 @@ class JobManager:
             state, result = self.client.poll(job.call_id) if job.call_id else ("running", None)
         except Exception as e:
             run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
-            failed = errors.object_failed if job.kind == "object" else errors.training_failed
+            failed = {"object": errors.object_failed, "preview": errors.preview_failed}.get(
+                job.kind, errors.training_failed
+            )
             if run and run.get("status") in FINAL:
                 self._apply_result(job, run)
             elif type(e).__name__ == "FunctionTimeoutError":
