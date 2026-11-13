@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Secrets and local config
+.env
+*.env
+.modal.toml
+
+# Data and scene outputs (stored on HF Hub, not in git)
+data/
+outputs/
+*.ply
+*.splat
+*.spz
+*.mp4
+*.mov
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

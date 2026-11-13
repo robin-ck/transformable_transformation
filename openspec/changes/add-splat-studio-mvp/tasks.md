@@ -1,9 +1,9 @@
 # Tasks: add-splat-studio-mvp
 
 ## 1. Repo
-- [ ] 1.1 Create private GitHub repo; add README, licence, `.gitignore`, `pyproject.toml`
-- [ ] 1.2 GitHub Actions: ruff + pytest on push
-- [ ] 1.3 Document secrets setup (Modal token, HF token) in README
+- [x] 1.1 Create private GitHub repo; add README, licence, `.gitignore`, `pyproject.toml`
+- [x] 1.2 GitHub Actions: ruff + pytest on push
+- [x] 1.3 Document secrets setup (Modal token, HF token) in README
 
 ## 2. Reconstruction (Modal)
 - [ ] 2.1 Spike: Modal GPU function called from a Space, with a cost/runtime log per run
