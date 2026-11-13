@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+DETAIL_CHARS = 2000
+
 FILMING_TIP = (
     "Tip: move slowly around the subject, keep it in view, overlap each shot by about "
     "two thirds with the previous one, avoid motion blur, and avoid shiny or blank surfaces."
@@ -17,12 +19,16 @@ class ReconstructionError(Exception):
     code: str
     message: str
     tip: str = ""
+    detail: str = ""  # technical log tail for debugging; kept in run.json, not shown in the UI
 
     def __str__(self) -> str:
         return f"{self.message} {self.tip}".strip()
 
     def to_dict(self) -> dict[str, str]:
-        return {"code": self.code, "message": self.message, "tip": self.tip}
+        out = {"code": self.code, "message": self.message, "tip": self.tip}
+        if self.detail:
+            out["detail"] = self.detail
+        return out
 
 
 def too_few_frames(n: int, minimum: int) -> ReconstructionError:
@@ -33,11 +39,23 @@ def too_few_frames(n: int, minimum: int) -> ReconstructionError:
     )
 
 
-def no_poses() -> ReconstructionError:
+def no_poses(detail: str = "") -> ReconstructionError:
     return ReconstructionError(
         "pose_failed",
         "Camera positions could not be recovered from your footage.",
         FILMING_TIP,
+        detail[-DETAIL_CHARS:],
+    )
+
+
+def pose_tool_failed(step: str, detail: str) -> ReconstructionError:
+    """COLMAP itself crashed or was misconfigured: our fault, not the footage."""
+    return ReconstructionError(
+        "pose_tool_failed",
+        f"The camera pose step (COLMAP {step}) failed with an internal error. "
+        "This is a problem on our side, not with your footage.",
+        "Please try again later or report the job ID.",
+        detail[-DETAIL_CHARS:],
     )
 
 

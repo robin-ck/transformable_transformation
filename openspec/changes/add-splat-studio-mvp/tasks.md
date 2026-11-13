@@ -16,6 +16,9 @@
 - [x] 2.3 Readable failure messages for pose failure
 - [ ] 2.4 Test on 2 sample videos and 1 photo set; record time per run
   - open: needs a Modal account (not reachable from the dev sandbox)
+  - 2026-11-13: first two runs failed as `pose_failed`. Cause on our side: `sparse/` was never
+    created, so `colmap mapper` exited with an error, and every mapper error was reported as bad
+    footage. Fixed; COLMAP crashes now report `pose_tool_failed` and the log tail goes to `run.json`.
 
 ## 3. Space and viewer
 - [x] 3.1 Gradio Space with upload + validation (unit tests for limits)
