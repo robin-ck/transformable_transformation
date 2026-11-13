@@ -32,10 +32,18 @@ image = (
         f"gsplat=={GSPLAT_VERSION}",
         extra_index_url="https://docs.gsplat.studio/whl/pt24cu124",
     )
+    # fused-ssim's setup.py imports torch, so it must build without isolation
+    # (isolated build envs can't see the torch installed above). The build
+    # container has no GPU, so the CUDA arch is set explicitly: 8.6 = A10G.
+    # Modal's add_python interpreter was built with clang, so extensions would
+    # look for clang++; point them at the image's gcc instead.
+    .apt_install("build-essential")
+    .pip_install("setuptools", "wheel")
+    .env({"TORCH_CUDA_ARCH_LIST": "8.6", "CC": "gcc", "CXX": "g++"})
     .run_commands(
         f"git clone --depth 1 --branch v{GSPLAT_VERSION} "
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
-        f"pip install -r {GSPLAT_DIR}/examples/requirements.txt",
+        f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
     )
     .add_local_python_source("splat_studio")
 )
@@ -62,7 +70,9 @@ def gpu_probe(job_id: str = "spike") -> dict:
     t = time.time()
     smi = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.strip()
     log.stage("nvidia_smi", time.time() - t)
-    return {"gpu": smi, **log.finish("done").to_dict()}
+    out = {**log.finish("done").to_dict(), "nvidia_smi": smi}
+    print(json.dumps(out))  # `modal run` discards return values; print to see it
+    return out
 
 
 @app.function(gpu=TRAIN_GPU, cpu=CPU_CORES, timeout=TRAIN_TIMEOUT_S, secrets=[hf_secret], retries=0)

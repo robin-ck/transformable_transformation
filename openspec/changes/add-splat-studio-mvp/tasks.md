@@ -6,8 +6,12 @@
 - [x] 1.3 Document secrets setup (Modal token, HF token) in README
 
 ## 2. Reconstruction (Modal)
-- [ ] 2.1 Spike: Modal GPU function called from a Space, with a cost/runtime log per run
-  - code done (`gpu_probe`, `RunLog`, `modal_client`); open: deploy and record real cost per run
+- [x] 2.1 Spike: Modal GPU function called from a Space, with a cost/runtime log per run
+  - 2026-11-13: `gpu_probe` ran on a Tesla T4 from the local CLI (Space-side call comes with task 3).
+    In-container work 0.1 s; end-to-end with cold start 14-17 s, so about $0.003 per probe at
+    $0.000164/s. First image build (gsplat + CUDA extensions) took about 2 min; later runs reuse the cache.
+  - Image build fixes: `--no-build-isolation` for fused-ssim/fused-bilagrid, `CC=gcc CXX=g++`,
+    `TORCH_CUDA_ARCH_LIST=8.6`. The gsplat 1.5.3 pin installs and builds.
 - [x] 2.2 Modal function: frame extraction, COLMAP poses, `gsplat` training, `.ply` + compressed export
 - [x] 2.3 Readable failure messages for pose failure
 - [ ] 2.4 Test on 2 sample videos and 1 photo set; record time per run
