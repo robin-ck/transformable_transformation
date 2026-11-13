@@ -18,6 +18,8 @@ Browser ── HF Space (Gradio UI + JS splat viewer)
 | GPU choice | T4/L4 for previews and text-to-3D; A10G/L40S for training and scene edits | Balances speed against credit use. |
 | Text-to-3D | Open model that outputs Gaussians or mesh (e.g. TRELLIS-class); mesh is converted to Gaussians | Choose final model in task 4.1 after licence check. |
 | Scene edit | Iterative dataset update (Instruct-NeRF2NeRF/GaussianEditor-style) with an instruction-following image editor | Most mature published approach; slow, so it runs as a long Modal job with a runtime cap. |
+| COLMAP build | Ubuntu apt COLMAP, CPU SIFT; sequential matcher for video, exhaustive for photos | No CUDA COLMAP build to maintain; revisit if pose time dominates in task 2.4. |
+| Training budget | 7,000 gsplat steps by default (gsplat default 30,000), 60 min hard timeout | Keeps cost per scene low; raise if quality is too poor. |
 | Preview | Image-to-image/ControlNet-depth on Modal | Fast, keeps scene layout. |
 | Storage | Private HF Hub dataset | Free, versioned, readable from both Space and Modal. |
 

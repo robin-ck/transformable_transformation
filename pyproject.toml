@@ -9,10 +9,11 @@ description = "Turn a video or photos into a 3D Gaussian splat scene and edit it
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.6", "pytest>=8"]
+modal = ["modal>=0.64"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

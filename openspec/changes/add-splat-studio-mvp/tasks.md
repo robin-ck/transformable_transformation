@@ -7,9 +7,11 @@
 
 ## 2. Reconstruction (Modal)
 - [ ] 2.1 Spike: Modal GPU function called from a Space, with a cost/runtime log per run
-- [ ] 2.2 Modal function: frame extraction, COLMAP poses, `gsplat` training, `.ply` + compressed export
-- [ ] 2.3 Readable failure messages for pose failure
+  - code done (`gpu_probe`, `RunLog`, `modal_client`); open: deploy and record real cost per run
+- [x] 2.2 Modal function: frame extraction, COLMAP poses, `gsplat` training, `.ply` + compressed export
+- [x] 2.3 Readable failure messages for pose failure
 - [ ] 2.4 Test on 2 sample videos and 1 photo set; record time per run
+  - open: needs a Modal account (not reachable from the dev sandbox)
 
 ## 3. Space and viewer
 - [ ] 3.1 Gradio Space with upload + validation (unit tests for limits)

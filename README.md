@@ -48,11 +48,32 @@ This stores the Modal token in `~/.modal.toml`. Set `HF_TOKEN` in your shell or 
 
 **Hugging Face Space:** Space → Settings → Variables and secrets → add `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` and `HF_TOKEN` as *secrets* (not variables).
 
-**Modal functions:** create a Modal secret holding the HF token, so GPU jobs can write results to the Hub:
+**Modal functions:** see *GPU jobs (Modal)* below for the `huggingface` Modal secret.
+
+## GPU jobs (Modal)
+
+GPU code lives in `modal_app/app.py`; the shared pipeline logic is in `src/splat_studio/reconstruction/`.
+
+1. Create a private HF dataset repo (e.g. `<you>/splat-studio-data`).
+2. Store the HF token and dataset name in one Modal secret:
 
 ```bash
-modal secret create huggingface HF_TOKEN=<your-token>
+modal secret create huggingface HF_TOKEN=<your-token> SPLAT_STUDIO_DATASET=<you>/splat-studio-data
 ```
+
+3. Run the GPU spike, which prints the GPU name, runtime and estimated cost:
+
+```bash
+modal run modal_app/app.py::gpu_probe
+```
+
+4. Deploy, so the Space can call the functions:
+
+```bash
+modal deploy modal_app/app.py
+```
+
+Reconstruction reads inputs from `jobs/<job_id>/input/` in the dataset and writes `scenes/<job_id>/v1/scene.ply`, `scene.splat` and a run log with stage timings and estimated cost to `jobs/<job_id>/run.json`. GPU prices in `reconstruction/cost.py` are approximate; check modal.com/pricing.
 
 ## Licence
 
