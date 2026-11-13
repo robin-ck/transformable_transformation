@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Scene versions
-The system SHALL store every edit as a new version, list versions with their prompt and date, and let the user switch between them without loss. The list SHALL show, for each version, its number, date, mode (reconstruction, add object, edit, ...), prompt, model and the version it was made from, newest first.
+The system SHALL store every edit as a new version, list versions with their prompt and date, and let the user switch between them without loss. The list SHALL show, for each version, its number, date, mode (reconstruction, add object, edit scene), prompt, model and the version it was made from, newest first. Previews and edits that have not produced a version (running or failed) SHALL appear in the same list, marked as such, and SHALL NOT open a version.
 
 #### Scenario: Revert
 - **WHEN** the user selects version 2 while viewing version 4
