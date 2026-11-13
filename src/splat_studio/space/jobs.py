@@ -5,6 +5,8 @@ State lives in the dataset repo, so a job survives the user closing the page:
   jobs/<job_id>/job.json    Space-side record (this module)
   jobs/<job_id>/run.json    worker-side run log (written by modal_app/app.py)
   scenes/<job_id>/v1/...    finished scene
+Object jobs (task 4.2) use the same layout under `objects/<job_id>/`, with the
+generated object in `object.ply`, `object.splat` and `reference.png`.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from .validation import ValidUpload
 
 FINAL = {"done", "failed"}
 TRAIN_TIMEOUT_S = 60 * 60  # keep in sync with modal_app/app.py
+OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
 
 
 class Store(Protocol):
@@ -148,6 +151,7 @@ class Job:
     scene_path: str | None = None
     error: dict[str, str] | None = None
     run: dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)  # e.g. prompt, seed, scene
 
     def elapsed(self, now: float) -> float:
         return (self.finished_at or now) - self.created_at
@@ -177,22 +181,19 @@ class JobManager:
         store: Store,
         client: Any = modal_client,
         clock: Callable[[], float] = time.time,
+        prefix: str = "jobs",
+        timeout_s: int = TRAIN_TIMEOUT_S,
     ) -> None:
         self.store, self.client, self.clock = store, client, clock
+        self.prefix, self.timeout_s = prefix, timeout_s
 
     def _save(self, job: Job) -> Job:
-        self.store.write_json(f"jobs/{job.job_id}/job.json", asdict(job))
+        self.store.write_json(f"{self.prefix}/{job.job_id}/job.json", asdict(job))
         return job
 
-    def create(self, upload: ValidUpload, steps: int = 7000) -> Job:
-        """Upload inputs, record the job, start the Modal reconstruction."""
-        now = self.clock()
-        job = Job(new_job_id(now), upload.kind, upload.summary, now)
-        files = {f"jobs/{job.job_id}/input/{i:03d}_{p.name}": p for i, p in enumerate(upload.files)}
-        self.store.upload_files(files, f"Inputs for job {job.job_id}")
-        self._save(job)
+    def _start(self, job: Job, submit: Callable[[], str]) -> Job:
         try:
-            job.call_id = self.client.submit_reconstruction(job.job_id, steps=steps)
+            job.call_id = submit()
         except Exception as e:
             job.status, job.finished_at = "failed", self.clock()
             job.error = errors.ReconstructionError(
@@ -202,8 +203,25 @@ class JobManager:
             ).to_dict()
         return self._save(job)
 
+    def create(self, upload: ValidUpload, steps: int = 7000) -> Job:
+        """Upload inputs, record the job, start the Modal reconstruction."""
+        now = self.clock()
+        job = Job(new_job_id(now), upload.kind, upload.summary, now)
+        files = {f"jobs/{job.job_id}/input/{i:03d}_{p.name}": p for i, p in enumerate(upload.files)}
+        self.store.upload_files(files, f"Inputs for job {job.job_id}")
+        self._save(job)
+        return self._start(job, lambda: self.client.submit_reconstruction(job.job_id, steps=steps))
+
+    def create_object(self, prompt: str, scene_id: str | None = None, seed: int = 0) -> Job:
+        """Record an object job and start the Modal text-to-3D function."""
+        now = self.clock()
+        job = Job(new_job_id(now), "object", " ".join(prompt.split())[:80], now)
+        job.params = {"prompt": prompt, "seed": seed, "scene_id": scene_id}
+        self._save(job)
+        return self._start(job, lambda: self.client.submit_object(job.job_id, prompt, seed=seed))
+
     def get(self, job_id: str) -> Job | None:
-        data = self.store.read_json(f"jobs/{job_id}/job.json")
+        data = self.store.read_json(f"{self.prefix}/{job_id}/job.json")
         return Job.from_dict(data) if data else None
 
     def _apply_result(self, job: Job, result: dict) -> None:
@@ -221,29 +239,28 @@ class JobManager:
         try:
             state, result = self.client.poll(job.call_id) if job.call_id else ("running", None)
         except Exception as e:
-            run = self.store.read_json(f"jobs/{job.job_id}/run.json")
+            run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
+            failed = errors.object_failed if job.kind == "object" else errors.training_failed
             if run and run.get("status") in FINAL:
                 self._apply_result(job, run)
             elif type(e).__name__ == "FunctionTimeoutError":
                 self._apply_result(
-                    job, {"status": "failed", "error": errors.timeout(TRAIN_TIMEOUT_S).to_dict()}
+                    job, {"status": "failed", "error": errors.timeout(self.timeout_s).to_dict()}
                 )
             else:
-                self._apply_result(
-                    job, {"status": "failed", "error": errors.training_failed(repr(e)).to_dict()}
-                )
+                self._apply_result(job, {"status": "failed", "error": failed(repr(e)).to_dict()})
         else:
             if state == "finished":
                 self._apply_result(job, result or {})
             else:
-                run = self.store.read_json(f"jobs/{job.job_id}/run.json")
+                run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
                 job.status = "running" if run else "queued"
                 job.run = run or {}
         return self._save(job) if asdict(job) != before else job
 
     def list(self, refresh: bool = True) -> list[Job]:
         """All jobs, newest first; unfinished jobs are refreshed."""
-        jobs = [j for j in (self.get(i) for i in self.store.list_dirs("jobs")) if j]
+        jobs = [j for j in (self.get(i) for i in self.store.list_dirs(self.prefix)) if j]
         if refresh:
             jobs = [self.refresh(j) for j in jobs]
         return sorted(jobs, key=lambda j: j.created_at, reverse=True)

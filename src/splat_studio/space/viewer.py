@@ -9,6 +9,11 @@ Space's origin, so the relative `/gradio_api/file=` URL works and no CORS setup 
 Navigation comes from Three.js OrbitControls: left drag orbits, right drag (or
 two-finger drag) pans, wheel (or pinch) zooms. "Reset view" (or the R key) returns
 to the start camera.
+
+Placement mode (task 4.2): a second `.splat` (a generated object) is loaded next to
+the scene with its own position, turn and size. The page listens for
+`{type: "placement", x, y, z, turn, size}` messages from the Space and moves the
+object live, so dragging a slider does not reload the scene.
 """
 
 from __future__ import annotations
@@ -79,14 +84,19 @@ def file_url(path: Path) -> str:
     return "/gradio_api/file=" + Path(path).resolve().as_posix()
 
 
-def viewer_document(scene_url: str, camera: Camera) -> str:
-    """Self-contained HTML page that shows one `.splat` scene."""
+def viewer_document(scene_url: str, camera: Camera, obj: dict | None = None) -> str:
+    """Self-contained HTML page that shows one `.splat` scene.
+
+    `obj` adds a movable object: {"url": ..., "position": [...], "quaternion": [x, y, z, w],
+    "scale": [...]} (see `editing.objects.Placement.to_viewer`).
+    """
     config = json.dumps(
         {
             "url": scene_url,
             "position": camera.position,
             "lookAt": camera.look_at,
             "up": camera.up,
+            "object": obj,
         }
     ).replace("</", "<\\/")
     return (
@@ -96,9 +106,11 @@ def viewer_document(scene_url: str, camera: Camera) -> str:
     )
 
 
-def viewer_iframe(scene_url: str, camera: Camera, height: int = 560) -> str:
+def viewer_iframe(
+    scene_url: str, camera: Camera, height: int = 560, obj: dict | None = None
+) -> str:
     """The viewer as an iframe for a `gr.HTML` block."""
-    doc = html.escape(viewer_document(scene_url, camera), quote=True)
+    doc = html.escape(viewer_document(scene_url, camera, obj), quote=True)
     return (
         f'<iframe class="splat-viewer" title="3D scene viewer" srcdoc="{doc}" '
         f'style="width:100%;height:{int(height)}px;border:0;border-radius:8px;" '
@@ -150,6 +162,7 @@ try {
     initialCameraLookAt: cfg.lookAt,
     sharedMemoryForWorkers: false,
     useBuiltInControls: true,
+    dynamicScene: !!cfg.object,  // the object moves after loading
   });
   window.splatViewer = viewer;  // for debugging from the browser console
   msg.style.display = "none";  // the viewer shows its own loading progress
@@ -164,9 +177,28 @@ try {
   };
   document.getElementById("reset").addEventListener("click", reset);
   window.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R") reset(); });
-  await viewer.addSplatScene(cfg.url, {
-    format: GS.SceneFormat.Splat, showLoadingUI: true, progressiveLoad: true,
-  });
+  if (cfg.object) {
+    const o = cfg.object;
+    await viewer.addSplatScenes([
+      { path: cfg.url, format: GS.SceneFormat.Splat },
+      { path: o.url, format: GS.SceneFormat.Splat,
+        position: o.position, rotation: o.quaternion, scale: o.scale },
+    ], true);
+    window.addEventListener("message", (e) => {
+      const d = e.data;
+      if (!d || d.type !== "placement") return;
+      const obj = viewer.getSplatScene(1);
+      const half = (Number(d.turn) || 0) * Math.PI / 360;
+      obj.position.set(Number(d.x), Number(d.y), Number(d.z));
+      obj.quaternion.set(0, 0, Math.sin(half), Math.cos(half));  // turn about z (up)
+      const size = Math.max(Number(d.size) || 0, 1e-4);
+      obj.scale.set(size, size, size);
+    });
+  } else {
+    await viewer.addSplatScene(cfg.url, {
+      format: GS.SceneFormat.Splat, showLoadingUI: true, progressiveLoad: true,
+    });
+  }
   viewer.start();
   window.splatViewerReady = true;
 } catch (err) {
@@ -179,10 +211,18 @@ try {
 """
 
 
-def scene_html(store, scene_path: str | None, height: int = 560) -> str:
+def scene_html(
+    store,
+    scene_path: str | None,
+    height: int = 560,
+    object_path: str | None = None,
+    placement: dict | None = None,
+) -> str:
     """Viewer (or a message) for the scene version stored under `scene_path`.
 
     `store` is a `jobs.Store`; the `.splat` file is fetched to local disk first.
+    With `object_path` (an object job folder) and `placement` (`Placement.to_viewer()`),
+    the generated object is shown too and can be moved live.
     """
     if not scene_path:
         return placeholder("Pick a finished scene to view it here.", height)
@@ -192,4 +232,15 @@ def scene_html(store, scene_path: str | None, height: int = 560) -> str:
         return placeholder(f"The scene file could not be fetched ({type(e).__name__}).", height)
     if splat is None:
         return placeholder(f"No scene file found in {scene_path}.", height)
-    return viewer_iframe(file_url(splat), camera_for(splat_positions(splat)), height)
+    obj = None
+    if object_path:
+        try:
+            obj_splat = store.download(f"{object_path}/object.splat")
+        except Exception as e:
+            return placeholder(
+                f"The object file could not be fetched ({type(e).__name__}).", height
+            )
+        if obj_splat is None:
+            return placeholder(f"No object file found in {object_path}.", height)
+        obj = {"url": file_url(obj_splat), **(placement or {})}
+    return viewer_iframe(file_url(splat), camera_for(splat_positions(splat)), height, obj)

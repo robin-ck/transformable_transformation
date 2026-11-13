@@ -53,8 +53,43 @@
     has no `.ply`); not yet tried against HF Hub, where the `.ply` (367 MB) is fetched on click.
 
 ## 4. Text editing
-- [ ] 4.1 Licence check and pick text-to-3D, image-edit and preview models
-- [ ] 4.2 Add object: generate, convert to Gaussians, place/scale/rotate, merge
+- [x] 4.1 Licence check and pick text-to-3D, image-edit and preview models
+  - 2026-11-13: licences read from the HF model cards; choice and rejected models in design.md
+    (Models). Add object: FLUX.1-schnell image, then TRELLIS-image-large to Gaussians
+    (TRELLIS-text-xlarge as fallback). Edit scene: InstructPix2Pix. Preview: SDXL + depth ControlNet.
+  - `splat_studio/models.py` pins repo ids and commits; a test keeps licences in the allow list.
+  - Hunyuan3D rejected: its licence excludes the EU. No model has been run yet (comes with 4.2-4.4).
+- [x] 4.2 Add object: generate, convert to Gaussians, place/scale/rotate, merge
+  - Modal `generate_object` (L40S, 15 min cap): FLUX.1-schnell reference image, then
+    TRELLIS-image-large straight to Gaussians (no mesh step), stored normalised (base centre at
+    the origin, largest side 1) in `objects/<job>/` with `reference.png` and `run.json`.
+  - `splat_studio/editing/objects.py`: placement p' = size * Rz(turn) * p + (x, y, z), merge into
+    the scene's PLY layout; `space/add_object.py` writes the result as a new version with prompt,
+    model, object job and placement in `version.json`. Cancel writes nothing.
+  - Space: "Add object" section; the job is polled every 5 s; when done the viewer shows the
+    scene plus the object, and the sliders (move x/y, height, turn, size) move it live through
+    `postMessage`, without reloading the scene.
+  - 2026-11-13: TRELLIS step run on Modal with TRELLIS's own mailbox example image (job
+    `20261113-trellis-test`): 2 min 17 s, about $0.07 (first run: 52 s to download weights,
+    10 s for the Gaussians); 918 k Gaussians. Placed into the real scene locally (Modal call
+    replaced by that object): live preview, sliders, merge and cancel work; the merged object sits
+    exactly at the slider values.
+  - 2026-11-13: full run "a mature oak tree" (job `20261113-oak-tree`, FLUX terms accepted):
+    5 min 2 s, about $0.16, of which 154 s was the one-time FLUX download into the volume;
+    image 4.5 s, TRELLIS load 30.5 s, Gaussians 35.1 s. Clean reference image; 1.45 M Gaussians
+    (`.ply` 99 MB). Placed into the real scene locally: v2 with both model names in `version.json`.
+  - Fix (same day): objects were saved lying on their side. TRELLIS's `save_ply` turns its
+    z-up frame to y-up by default; now saved with `transform=None`. Checked: trunk below leaves.
+  - Speed-up: TRELLIS's weight files are read into memory while FLUX loads (building both models
+    in parallel threads is not safe: diffusers' init_empty_weights patches torch for the whole
+    process). `editing/simplify.py` merges the object's Gaussians per grid cell (moment
+    matching) down to <= 250 k. Oak: 1.45 M -> 208 k Gaussians, `.ply` 99 -> 14 MB, 2.5 s;
+    side by side it looks nearly the same (leaf clumps slightly softer).
+  - 2026-11-13 rerun (job `20261113-oak-tree-v2`, weights cached): 2 min 11 s in the container,
+    about $0.07. FLUX load 22 s, image 4 s, TRELLIS load 22 s, Gaussians 13 s, trim 2.5 s; about
+    65 s was not covered by a stage, so imports and uploads are now logged too.
+  - Deployed with `modal deploy` (2026-11-13). The Space reads a local `.env` for HF_TOKEN and
+    SPLAT_STUDIO_DATASET. open: not yet tried from the Space against HF Hub.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
 - [ ] 4.5 Prompt log per version

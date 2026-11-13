@@ -48,8 +48,71 @@ image = (
     .add_local_python_source("splat_studio")
 )
 
+# Add object (task 4.2): FLUX.1-schnell makes a reference image, TRELLIS turns it into
+# Gaussians. FLUX's transformer alone is 24 GB in bf16, so this runs on an L40S (48 GB).
+# Only TRELLIS's Gaussian path is used; its research-only renderers are not installed.
+OBJECT_GPU = "L40S"
+OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with splat_studio/space/jobs.py
+TRELLIS_COMMIT = "193e0502b5cb3eb5997ec457d5340e95d09b158e"
+TRELLIS_DIR = "/opt/trellis"
+MODELS_DIR = "/models"  # Modal Volume: weights survive between runs
+
+object_image = (
+    modal.Image.from_registry("nvidia/cuda:12.4.1-runtime-ubuntu22.04", add_python="3.11")
+    .apt_install("git", "libgl1", "libglib2.0-0", "libgomp1")
+    .pip_install(
+        "torch==2.4.0",
+        "torchvision==0.19.0",
+        "xformers==0.0.27.post2",
+        index_url="https://download.pytorch.org/whl/cu121",
+    )
+    .pip_install(
+        "numpy<2",
+        "huggingface_hub>=0.25,<1",
+        "diffusers==0.31.0",
+        "transformers==4.46.3",
+        "accelerate==1.1.1",
+        "sentencepiece",
+        "protobuf",
+        "spconv-cu120==2.3.6",
+        "pillow",
+        "imageio",
+        "easydict",
+        "opencv-python-headless",
+        "scipy",
+        "plyfile",
+        "trimesh",
+        "open3d==0.18.0",  # imported by trellis.pipelines at package load
+        "rembg==2.0.60",
+        "onnxruntime==1.20.1",
+        "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8",
+    )
+    # kaolin (Apache-2.0) is imported by TRELLIS's FlexiCubes mesh code at package load.
+    .pip_install(
+        "kaolin==0.17.0",
+        find_links="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu121.html",
+    )
+    .run_commands(
+        f"git clone https://github.com/microsoft/TRELLIS {TRELLIS_DIR}",
+        f"cd {TRELLIS_DIR} && git checkout {TRELLIS_COMMIT} && git submodule update --init",
+    )
+    .env(
+        {
+            "PYTHONPATH": TRELLIS_DIR,
+            "ATTN_BACKEND": "xformers",
+            "SPARSE_BACKEND": "spconv",
+            "SPCONV_ALGO": "native",
+            "HF_HOME": f"{MODELS_DIR}/hf",
+            "TORCH_HOME": f"{MODELS_DIR}/torch",
+            "U2NET_HOME": f"{MODELS_DIR}/u2net",
+        }
+    )
+    .add_local_python_source("splat_studio")
+)
+
 app = modal.App(APP_NAME, image=image)
 hf_secret = modal.Secret.from_name("huggingface-secret")
+models_volume = modal.Volume.from_name("splat-studio-models", create_if_missing=True)
 
 
 def _upload_json(api, repo: str, path: str, data: dict) -> None:
@@ -127,3 +190,199 @@ def reconstruct(job_id: str, steps: int = 7000) -> dict:
     _upload_json(api, repo, f"jobs/{job_id}/run.json", out)
     print(json.dumps(out))
     return out
+
+
+@app.function(image=object_image, timeout=300, secrets=[hf_secret])
+def check_model_access() -> dict:
+    """Cheap CPU check that the HF token can read every model we use (gated ones too)."""
+    from huggingface_hub import HfApi
+
+    from splat_studio import models
+
+    api, out = HfApi(), {}
+    try:  # the image must import TRELLIS and FLUX; cheaper to learn that here than on a GPU
+        import diffusers  # noqa: F401
+        import trellis.pipelines  # noqa: F401
+
+        out["imports"] = "ok"
+    except Exception as e:
+        out["imports"] = f"{type(e).__name__}: {str(e)[:300]}"
+    for spec in models.ALL:
+        try:
+            api.auth_check(spec.repo_id)  # raises GatedRepoError without accepted terms
+            api.model_info(spec.repo_id, revision=spec.revision)  # pinned commit exists
+            out[spec.repo_id] = "ok"
+        except Exception as e:
+            out[spec.repo_id] = f"{type(e).__name__}: {str(e)[:200]}"
+    print(json.dumps(out, indent=2))
+    return out
+
+
+OBJECT_PROMPT = (
+    "{prompt}. A single object, centred, the whole object in view, "
+    "plain white background, soft even studio lighting, high detail."
+)
+
+
+@app.function(
+    image=object_image,
+    gpu=OBJECT_GPU,
+    memory=48 * 1024,
+    timeout=OBJECT_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+)
+def generate_object(
+    job_id: str, prompt: str, seed: int = 0, reference_image: str | None = None
+) -> dict:
+    """Text -> reference image -> 3D Gaussians; uploads the object to objects/<job_id>/.
+
+    `reference_image` (a path inside the container) skips the text-to-image step; used
+    to test the 3D step alone, e.g. with an image from TRELLIS's own examples:
+      modal run modal_app/app.py::generate_object --job-id test --prompt mailbox
+        --reference-image /opt/trellis/assets/example_image/typical_misc_mailbox.png
+    """
+    import torch
+    from huggingface_hub import HfApi, snapshot_download
+
+    from splat_studio import models
+    from splat_studio.editing.objects import normalise_object
+    from splat_studio.editing.simplify import simplify
+    from splat_studio.reconstruction import errors
+    from splat_studio.reconstruction.cost import RunLog
+    from splat_studio.reconstruction.export import read_ply, to_splat_bytes, write_ply
+
+    repo = os.environ["SPLAT_STUDIO_DATASET"]
+    api = HfApi()
+    prefix = f"objects/{job_id}"
+    log = RunLog(job_id=job_id, gpu=OBJECT_GPU)
+    _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+    model_label = f"{models.TEXT_TO_IMAGE.label} + {models.IMAGE_TO_3D.label}"
+    if reference_image:
+        model_label = models.IMAGE_TO_3D.label
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        t = time.time()
+        from trellis.pipelines import TrellisImageTo3DPipeline  # fail fast on a broken image
+
+        log.stage("imports", time.time() - t)
+
+        def prefetch_trellis() -> str:
+            """Read TRELLIS's weight files into the page cache while FLUX loads and runs.
+
+            Only file reads: building TRELLIS's models in this thread is not safe, because
+            diffusers builds FLUX under accelerate's init_empty_weights, which patches
+            torch.nn for the whole process and would leave TRELLIS's weights empty.
+            """
+            path = snapshot_download(
+                models.IMAGE_TO_3D.repo_id, revision=models.IMAGE_TO_3D.revision
+            )
+            roots = [Path(path), Path(os.environ["TORCH_HOME"]), Path(os.environ["U2NET_HOME"])]
+            for root in roots:
+                for f in root.rglob("*") if root.exists() else []:
+                    if f.is_file() and f.stat().st_size > 1_000_000:
+                        with f.open("rb") as fh:
+                            while fh.read(16 << 20):
+                                pass
+            return path
+
+        loader = ThreadPoolExecutor(max_workers=1)
+        trellis_future = loader.submit(prefetch_trellis)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            if reference_image:
+                from PIL import Image
+
+                image = Image.open(reference_image)
+                image.save(tmp_path / "reference.png")
+            else:
+                t = time.time()
+                from diffusers import FluxPipeline
+
+                try:
+                    flux = FluxPipeline.from_pretrained(
+                        models.TEXT_TO_IMAGE.repo_id,
+                        revision=models.TEXT_TO_IMAGE.revision,
+                        torch_dtype=torch.bfloat16,
+                    ).to("cuda")
+                except Exception as e:
+                    if "gated" in str(e).lower() or "401" in str(e) or "403" in str(e):
+                        raise errors.model_access(models.TEXT_TO_IMAGE.repo_id, repr(e)) from e
+                    raise
+                log.stage("load_image_model", time.time() - t)
+
+                t = time.time()
+                image = flux(
+                    OBJECT_PROMPT.format(prompt=prompt.strip().rstrip(".")),
+                    guidance_scale=0.0,
+                    num_inference_steps=4,
+                    max_sequence_length=256,
+                    height=1024,
+                    width=1024,
+                    generator=torch.Generator("cpu").manual_seed(seed),
+                ).images[0]
+                del flux
+                torch.cuda.empty_cache()
+                image.save(tmp_path / "reference.png")
+                log.stage("image", time.time() - t)
+
+            t = time.time()
+            trellis_dir = trellis_future.result()
+            loader.shutdown()
+            log.stage("wait_prefetch", time.time() - t)
+            t = time.time()
+            trellis = TrellisImageTo3DPipeline.from_pretrained(trellis_dir)
+            trellis.cuda()
+            models_volume.commit()  # keep downloaded weights for the next run
+            log.stage("load_3d_model", time.time() - t)
+
+            t = time.time()
+            out = trellis.run(image, seed=seed, formats=["gaussian"])
+            raw = tmp_path / "raw.ply"
+            # TRELLIS's own frame is z-up like our scenes; its default transform would turn
+            # the object to y-up for other viewers, so keep the frame as it is.
+            out["gaussian"][0].save_ply(str(raw), transform=None)
+            log.stage("gaussians", time.time() - t)
+
+            t = time.time()
+            raw_gaussians = read_ply(raw)
+            obj = simplify(normalise_object(raw_gaussians))
+            write_ply(tmp_path / "object.ply", obj)
+            (tmp_path / "object.splat").write_bytes(to_splat_bytes(obj))
+            log.stage("simplify", time.time() - t)
+
+            t = time.time()
+            for name in ["object.ply", "object.splat", "reference.png"]:
+                api.upload_file(
+                    path_or_fileobj=str(tmp_path / name),
+                    path_in_repo=f"{prefix}/{name}",
+                    repo_id=repo,
+                    repo_type="dataset",
+                )
+            log.stage("upload", time.time() - t)
+        log.finish("done")
+        result = {
+            **log.to_dict(),
+            "scene_path": prefix,
+            "num_gaussians": len(obj),
+            "raw_gaussians": len(raw_gaussians),
+            "model": model_label,
+            "prompt": prompt,
+            "seed": seed,
+        }
+    except errors.ReconstructionError as e:
+        result = log.finish("failed", e.to_dict()).to_dict()
+    except Exception as e:
+        import traceback
+
+        err = errors.object_failed(repr(e))
+        err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
+        result = log.finish("failed", err.to_dict()).to_dict()
+
+    _upload_json(api, repo, f"{prefix}/run.json", result)
+    print(json.dumps(result))
+    return result

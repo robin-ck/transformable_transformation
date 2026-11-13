@@ -41,3 +41,7 @@ def poll(call_id: str) -> tuple[str, dict | None]:
 
 def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
     return spawn("reconstruct", job_id, steps=steps)
+
+
+def submit_object(job_id: str, prompt: str, seed: int = 0) -> str:
+    return spawn("generate_object", job_id, prompt, seed=seed)

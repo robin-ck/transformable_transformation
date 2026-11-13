@@ -95,10 +95,12 @@ def add_version(
     model: str | None = None,
     parent: int | None = None,
     now: float | None = None,
+    extra: dict | None = None,
 ) -> Version:
     """Store a new version after the newest one; existing versions are never touched.
 
-    `files` maps a kind in `FILES` ("ply", "splat") to a local file.
+    `files` maps a kind in `FILES` ("ply", "splat") to a local file. `extra` is written
+    to `version.json` as well (e.g. the object job and placement that made the version).
     """
     unknown = set(files) - set(FILES)
     if unknown:
@@ -119,6 +121,7 @@ def add_version(
         f"Scene {scene_id} v{number} ({mode})",
     )
     meta = {k: v for k, v in asdict(version).items() if k not in {"scene_id", "number"}}
+    meta.update({k: v for k, v in (extra or {}).items() if k not in meta})
     store.write_json(f"{version.path}/version.json", meta)
     return version
 

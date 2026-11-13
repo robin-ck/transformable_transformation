@@ -44,7 +44,7 @@ pip install modal
 modal token new
 ```
 
-This stores the Modal token in `~/.modal.toml`. Set `HF_TOKEN` in your shell or in a local `.env` file.
+This stores the Modal token in `~/.modal.toml`. Set `HF_TOKEN` and `SPLAT_STUDIO_DATASET` in your shell, or put them in a `.env` file in the repo root (`KEY=value` per line); `space/app.py` reads it.
 
 **Hugging Face Space:** Space → Settings → Variables and secrets → add `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` and `HF_TOKEN` as *secrets* (not variables).
 

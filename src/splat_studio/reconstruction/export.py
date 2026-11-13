@@ -67,3 +67,19 @@ def ply_to_splat(ply: Path, splat: Path) -> int:
     v = read_ply(ply)
     splat.write_bytes(to_splat_bytes(v))
     return len(v)
+
+
+_NP_TO_PLY = {"f4": "float", "f8": "double", "u1": "uchar", "i4": "int", "u4": "uint"}
+
+
+def write_ply(path: Path, v: np.ndarray) -> None:
+    """Write a structured array as the vertex element of a binary little-endian PLY."""
+    lines = ["ply", "format binary_little_endian 1.0", f"element vertex {len(v)}"]
+    for name in v.dtype.names:
+        kind = v.dtype[name]
+        lines.append(f"property {_NP_TO_PLY[kind.kind + str(kind.itemsize)]} {name}")
+    lines.append("end_header")
+    le = v.astype(v.dtype.newbyteorder("<"), copy=False)
+    with path.open("wb") as f:
+        f.write(("\n".join(lines) + "\n").encode("ascii"))
+        le.tofile(f)
