@@ -90,7 +90,34 @@
     65 s was not covered by a stage, so imports and uploads are now logged too.
   - Deployed with `modal deploy` (2026-11-13). The Space reads a local `.env` for HF_TOKEN and
     SPLAT_STUDIO_DATASET. open: not yet tried from the Space against HF Hub.
-- [ ] 4.3 Preview: render view, image-to-image with depth control
+- [x] 4.3 Preview: render view, image-to-image with depth control
+  - Space: "Preview" section (look prompt, change strength 0.3-0.95, seed). The button asks
+    the viewer iframe for its camera (`postMessage` `get_camera`; Three.js camera-to-world,
+    fov, aspect), starts a job under `previews/<job>/`, polls every 5 s and shows the
+    result (downloadable) in a column next to the viewer, with the plain render under it.
+    Nothing is written under `scenes/`, so the version is unchanged.
+  - Modal `render_preview` (L4, 10 min cap): gsplat renders the version's `.splat` at the
+    viewer's camera (Three.js -> OpenCV axes, same vertical fov, about 1 MP with sides in
+    multiples of 64), colour + depth; inverse depth (near bright) is the control image for
+    SDXL img2img + depth ControlNet (fp16, 30 steps, control scale 0.6). Uploads
+    `render.png`, `depth.png`, `preview.png`. A view that shows < 5 % of the scene fails with
+    a tip to turn the camera. Camera maths, `.splat` decoding and the depth image live in
+    `splat_studio/editing/preview.py` (unit tested).
+  - 2026-11-13: first run failed: gsplat's `backgrounds` argument does not fit the RGB+ED
+    mode (it pads channels); the background is now blended in after rendering. The UI showed
+    the failure as a readable message.
+  - 2026-11-13: full run on the real scene, "a cosy carpentry workshop with warm evening
+    light, wooden walls, plants" (job `20261113-preview-test-a10g`, run on an A10G via
+    `with_options` because no L4 was free for over 7 min): 2 min 40 s, about $0.05.
+    Render 75 s (most likely gsplat compiling its CUDA kernels on first use in a fresh
+    container), model download + load 63 s (one-time download into the volume), restyle
+    11 s, upload 9 s. 1344x768 output. The render matches the viewer's view exactly
+    (same objects at the same places); the restyle keeps the layout and warms the light,
+    but drops the "plants" part of the prompt at strength 0.7.
+  - open: the 75 s render step; check on a second cold start whether gsplat's kernels are
+    cached, else build them into the image. L4 availability: if it keeps queueing, move
+    the default to A10G. The Space's own button click reached Modal (the camera arrived
+    correctly) but the successful run was spawned from the CLI with that recorded camera.
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
 - [x] 4.5 Prompt log per version
   - `splat_studio/space/prompt_log.py` reads what is already stored: each version's

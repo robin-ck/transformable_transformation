@@ -20,7 +20,8 @@ Browser ── HF Space (Gradio UI + JS splat viewer)
 | Scene edit | Iterative dataset update (Instruct-NeRF2NeRF/GaussianEditor-style) with an instruction-following image editor | Most mature published approach; slow, so it runs as a long Modal job with a runtime cap. |
 | COLMAP build | Ubuntu apt COLMAP, CPU SIFT; sequential matcher for video, exhaustive for photos | No CUDA COLMAP build to maintain; revisit if pose time dominates in task 2.4. |
 | Training budget | 7,000 gsplat steps by default (gsplat default 30,000), 60 min hard timeout | Keeps cost per scene low; raise if quality is too poor. |
-| Preview | SDXL img2img + SDXL depth ControlNet on Modal (L4); depth from the gsplat render | Fast, keeps scene layout; no depth estimator needed. |
+| Preview | SDXL img2img + SDXL depth ControlNet on Modal (L4); depth from the gsplat render of the `.splat` at the viewer's camera | Fast, keeps scene layout; no depth estimator needed. The `.splat` (50 MB, colour without view-dependent terms) is what the viewer shows, and downloads 7x faster than the `.ply`. An A10G also works (`with_options(gpu="A10G")`) when no L4 is free. |
+| Prompt log | Read from `version.json` per version and `job.json` per preview job; nothing extra stored | Versions already carry prompt, mode, model and parent, so a separate log could only drift from them. |
 | Storage | Private HF Hub dataset | Free, versioned, readable from both Space and Modal. |
 
 ## Models (task 4.1, licences checked 2026-11-13 on the Hugging Face model cards)
