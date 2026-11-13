@@ -48,7 +48,7 @@ This stores the Modal token in `~/.modal.toml`. Set `HF_TOKEN` in your shell or 
 
 **Hugging Face Space:** Space → Settings → Variables and secrets → add `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` and `HF_TOKEN` as *secrets* (not variables).
 
-**Modal functions:** see *GPU jobs (Modal)* below for the `huggingface` Modal secret.
+**Modal functions:** see *GPU jobs (Modal)* below for the `huggingface-secret` Modal secret.
 
 ## GPU jobs (Modal)
 
@@ -58,7 +58,7 @@ GPU code lives in `modal_app/app.py`; the shared pipeline logic is in `src/splat
 2. Store the HF token and dataset name in one Modal secret:
 
 ```bash
-modal secret create huggingface HF_TOKEN=<your-token> SPLAT_STUDIO_DATASET=<you>/splat-studio-data
+modal secret create huggingface-secret HF_TOKEN=<your-token> SPLAT_STUDIO_DATASET=<you>/splat-studio-data
 ```
 
 3. Run the GPU spike, which prints the GPU name, runtime and estimated cost:

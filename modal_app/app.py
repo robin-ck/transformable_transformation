@@ -2,7 +2,7 @@
 
 Deploy:  modal deploy modal_app/app.py
 Spike:   modal run modal_app/app.py::gpu_probe
-Needs a Modal secret named `huggingface` with HF_TOKEN, and the env var
+Needs a Modal secret named `huggingface-secret` with HF_TOKEN, and the env var
 SPLAT_STUDIO_DATASET (e.g. "your-name/splat-studio-data") set on that secret.
 """
 
@@ -41,7 +41,7 @@ image = (
 )
 
 app = modal.App(APP_NAME, image=image)
-hf_secret = modal.Secret.from_name("huggingface")
+hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
 def _upload_json(api, repo: str, path: str, data: dict) -> None:
