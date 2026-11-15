@@ -108,6 +108,30 @@ def preview_empty() -> ReconstructionError:
     )
 
 
+def edit_failed(detail: str) -> ReconstructionError:
+    return ReconstructionError(
+        "edit_failed",
+        "Editing the scene failed on the GPU. Please try again, or reword the instruction.",
+        f"Technical detail: {detail[-300:]}" if detail else "",
+    )
+
+
+def edit_empty() -> ReconstructionError:
+    return ReconstructionError(
+        "edit_empty",
+        "The current view shows almost nothing of the scene, so there is nothing to edit.",
+        "Tip: turn the camera towards the part you want to change (or press Reset view).",
+    )
+
+
+def region_empty() -> ReconstructionError:
+    return ReconstructionError(
+        "region_empty",
+        "The marked region holds almost no part of the scene.",
+        "Tip: drag the box over a visible surface, or edit without a region.",
+    )
+
+
 def model_access(repo_id: str, detail: str = "") -> ReconstructionError:
     """A gated model could not be downloaded with the configured HF token."""
     return ReconstructionError(

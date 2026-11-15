@@ -47,6 +47,18 @@ def submit_object(job_id: str, prompt: str, seed: int = 0) -> str:
     return spawn("generate_object", job_id, prompt, seed=seed)
 
 
+def submit_edit(
+    job_id: str,
+    scene_id: str,
+    number: int,
+    camera: dict,
+    prompt: str,
+    region: list[float] | None = None,
+    seed: int = 0,
+) -> str:
+    return spawn("edit_scene", job_id, scene_id, number, camera, prompt, region=region, seed=seed)
+
+
 def submit_preview(
     job_id: str, scene_path: str, camera: dict, prompt: str, seed: int = 0, strength: float = 0.7
 ) -> str:
