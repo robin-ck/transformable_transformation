@@ -100,7 +100,7 @@ Then add the four secrets (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `HF_TOKEN`, `
 
 The page has two tabs. It opens on **Scene** when a finished scene exists (at its newest version), otherwise on **New scene**.
 
-- **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; "Open newest scene" in the Scene tab opens it.
+- **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; pick it in the "Finished scene" list of the Scene tab to open it.
 - **Scene:** pick a scene; the viewer is on the left, the tools on the right. Switching tools keeps the scene, version, camera and any object being placed.
   - **History:** every version with date, mode, prompt, model and the version it was made from. Click a row to open that version. "Prompt log" also lists the 2D previews.
   - **Objects:** a table of the objects in the open version and those generated for the scene. Click **Hide**/**Show** to drop an object from the view only (downloads always contain every object). Click **Add** on a generated object to place another copy. Click a placed object's name to move, turn, tilt or resize it; "Save as new version" re-places it there, the other objects stay put. To make a new object, describe it and generate it (a few minutes); then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders. "Show object" hides it while you look around; "Cancel" saves nothing.

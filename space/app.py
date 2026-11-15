@@ -114,7 +114,13 @@ def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
 
 
 def scene_choices(jobs: list[Job]) -> list[tuple[str, str]]:
-    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in jobs if j.status == "done"]
+    """Finished scenes, oldest first (`jobs` is newest first).
+
+    New scenes go at the end: Gradio's dropdown marks its selection by position, so
+    putting a new scene first made it look selected and picking it did nothing.
+    """
+    done = [j for j in jobs if j.status == "done"]
+    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in reversed(done)]
 
 
 def refresh_all(current: str | None):
@@ -228,7 +234,7 @@ def on_load(obj_job: str | None, placing: bool):
     """
     jobs = JOBS.list()
     choices = scene_choices(jobs)
-    newest = choices[0][1] if choices else None  # the listing is newest first
+    newest = choices[-1][1] if choices else None
     return (
         gr.Tabs(selected="scene" if newest else "new"),
         jobs_table(jobs),
@@ -241,34 +247,25 @@ def on_load(obj_job: str | None, placing: bool):
 def on_tick(current: str | None, seen: list[str] | None):
     """Refresh jobs and picker; announce scenes that finished since the last listing.
 
-    The notice never changes the open scene; "Open newest scene" does that on request.
+    The notice never changes the open scene; picking it in the scene list opens it.
     """
     jobs = JOBS.list()
-    choices = scene_choices(jobs)
-    value = current if current in {v for _, v in choices} else None
     done = _done_ids(jobs)
+    if seen is not None and set(done) == set(seen):
+        picker = gr.skip()  # unchanged: do not redraw the list while it may be open
+    else:
+        choices = scene_choices(jobs)
+        value = current if current in {v for _, v in choices} else None
+        picker = gr.update(choices=choices, value=value)
     if seen is not None:
         for job in jobs:
             if job.job_id in set(done) - set(seen):
                 gr.Info(
                     f"Scene {job.job_id} ({job.summary}) is ready. "
-                    "Click 'Open newest scene' in the Scene tab to view it.",
+                    "Pick it in the 'Finished scene' list of the Scene tab to view it.",
                     duration=15,
                 )
-    return jobs_table(jobs), gr.update(choices=choices, value=value), done
-
-
-def on_open_newest(obj_job: str | None, placing: bool):
-    """Outputs: tabs, picker, then `SCENE_OUTPUTS`."""
-    choices = scene_choices(JOBS.list())
-    if not choices:
-        raise gr.Error("No finished scene yet.")
-    newest = choices[0][1]
-    return (
-        gr.Tabs(selected="scene"),
-        gr.update(choices=choices, value=newest),
-        *scene_view(newest, None, obj_job, placing),
-    )
+    return jobs_table(jobs), picker, done
 
 
 # --- objects and edits tables ------------------------------------------------------
@@ -880,10 +877,8 @@ def build() -> gr.Blocks:
                         label="Finished scene",
                         choices=[],
                         value=None,
-                        scale=4,
                         allow_custom_value=True,  # choices are filled in after load
                     )
-                    open_newest = gr.Button("Open newest scene", scale=1)
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=3):
                         viewer = gr.HTML(scene_html(STORE, None))
@@ -1009,15 +1004,6 @@ def build() -> gr.Blocks:
             *log
         ).then(*lib)
         gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
-        clicked(
-            open_newest,
-            "⏳ Opening…",
-            on_open_newest,
-            [obj_job, placing],
-            [tabs, picker, *scene_outputs],
-        ).then(  # fmt: skip
-            *log
-        ).then(*lib)
         picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log).then(*lib)
         history_table.select(
             on_pick_row, [picker, history_table, obj_job, placing], scene_outputs
