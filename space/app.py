@@ -801,7 +801,7 @@ def on_save_base(source: str | None):
     job = IMAGES.save_image(image)
     return (
         f"✅ Saved unchanged as a base (job {job.job_id}). Find it under "
-        '"Earlier images", or write a prompt and generate from it.',
+        '"Earlier images" below, or write a prompt and generate from it.',
         None,
         str(image),
         gr.update(interactive=True),
@@ -812,23 +812,33 @@ IMAGE_MODE_LABEL = {"image": "edited", "text": "from text", "upload": "base, unc
 
 
 def on_image_history():
-    """Finished images, newest first. Outputs: gallery items (image, caption), paths."""
-    items = []
-    for job in IMAGES.list(refresh=False):
-        if job.status != "done" or not job.scene_path or len(items) >= 24:
-            continue
+    """Finished images, newest first. Outputs: gallery items (image, caption), paths, note."""
+    items, missing, errors = [], 0, []
+    try:
+        finished = [j for j in IMAGES.list(refresh=False) if j.status == "done" and j.scene_path]
+    except Exception as e:
+        return [], [], f"⚠️ The image list could not be read ({type(e).__name__}: {str(e)[:150]})."
+    for job in finished[:24]:
         try:
             path = STORE.download(image_result_path(job))
-        except Exception:
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {str(e)[:150]}")
             continue
-        if path:
+        if not path:
+            missing += 1
+        else:
             mode = job.params.get("mode", "text")
             label = IMAGE_MODE_LABEL.get(mode, mode)
             seed = "" if mode == "upload" else f", seed {job.params.get('seed', 0)}"
             items.append((str(path), f"{job.summary} ({label}{seed})"))
-    if not items:
-        gr.Info("No finished images yet.")
-    return items, [p for p, _ in items]
+    note = f"{len(items)} of {len(finished)} finished images shown (newest first)."
+    if not finished:
+        note = "No finished images yet."
+    if missing:
+        note += f" {missing} file(s) missing in the dataset."
+    if errors:
+        note += f" {len(errors)} could not be fetched, e.g. {errors[0]}"
+    return items, [p for p, _ in items], note
 
 
 def on_pick_earlier(paths: list[str] | None, evt: gr.SelectData):
@@ -1040,7 +1050,7 @@ def build() -> gr.Blocks:
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
 
             # --- Image editing: 2D images, no scene needed ----------------------------
-            with gr.Tab("Image editing", id="image"):
+            with gr.Tab("Image editing", id="image") as image_tab:
                 gr.Markdown(
                     "Make an image from a text, or change an image you upload. "
                     "This works without a scene and changes no scene."
@@ -1079,12 +1089,14 @@ def build() -> gr.Blocks:
                             interactive=False, format="png", height=520,
                         )  # fmt: skip
                         im_again = gr.Button("Use result as input", interactive=False)
-                with gr.Accordion("Earlier images", open=False):
-                    im_history_go = gr.Button("Show earlier images")
-                    im_history = gr.Gallery(
-                        label="Finished images (click one to use it as the input)",
-                        columns=6, height=320, object_fit="cover", allow_preview=False,
-                    )  # fmt: skip
+                gr.Markdown("### Earlier images")
+                with gr.Row(equal_height=True):
+                    im_history_note = gr.Markdown()
+                    im_history_go = gr.Button("Refresh list", scale=0, min_width=140)
+                im_history = gr.Gallery(
+                    label="Generated and saved images (click one to use it as the input)",
+                    columns=6, height=320, object_fit="cover", allow_preview=False,
+                )  # fmt: skip
         sliders = [px, py, pz, pturn, psize, ptilt_x, ptilt_y]  # order of Placement's fields
         end = [place_group, placing, obj_job]
         scene_outputs = [
@@ -1221,7 +1233,11 @@ def build() -> gr.Blocks:
             im_keep, "⏳ Saving…", on_save_base, im_source,
             [im_status, image_job, im_result, im_again],
         )  # fmt: skip
-        clicked(im_history_go, "⏳ Loading…", on_image_history, None, [im_history, image_paths])
+        history_out = [im_history, image_paths, im_history_note]
+        clicked(im_history_go, "⏳ Loading…", on_image_history, None, history_out)
+        # Load the list when the tab opens, and again whenever a new result arrives.
+        image_tab.select(on_image_history, None, history_out)
+        im_result.change(on_image_history, None, history_out)
         im_history.select(on_pick_earlier, image_paths, [im_mode, im_source, *mode_outputs[1:]])
 
         # Downloads (always the full files, whatever is hidden)
