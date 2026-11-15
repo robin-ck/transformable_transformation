@@ -19,6 +19,7 @@ import gradio as gr
 # On the Space, splat_studio is uploaded next to this file; locally use src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from splat_studio.editing import images  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import (  # noqa: E402
@@ -46,6 +47,7 @@ from splat_studio.space.add_object import (  # noqa: E402
 )
 from splat_studio.space.jobs import (  # noqa: E402
     EDIT_TIMEOUT_S,
+    IMAGE_TIMEOUT_S,
     OBJECT_TIMEOUT_S,
     PREVIEW_TIMEOUT_S,
     HubStore,
@@ -53,11 +55,13 @@ from splat_studio.space.jobs import (  # noqa: E402
     JobManager,
     LocalStore,
     format_elapsed,
+    image_result_path,
 )
 from splat_studio.space.validation import (  # noqa: E402
     HELP,
     UploadError,
     validate_object_image,
+    validate_source_image,
     validate_upload,
 )
 from splat_studio.space.versions import (  # noqa: E402
@@ -93,6 +97,7 @@ JOBS = JobManager(STORE)
 OBJECTS = JobManager(STORE, prefix="objects", timeout_s=OBJECT_TIMEOUT_S)
 PREVIEWS = JobManager(STORE, prefix="previews", timeout_s=PREVIEW_TIMEOUT_S)
 EDITS = JobManager(STORE, prefix="edits", timeout_s=EDIT_TIMEOUT_S)
+IMAGES = JobManager(STORE, prefix="images", timeout_s=IMAGE_TIMEOUT_S)
 STATUS_LABEL = {
     "queued": "⏳ queued",
     "running": "⚙️ running",
@@ -584,7 +589,12 @@ def on_generate(
         raise gr.Error("Describe the object, e.g. 'a mature oak tree', or upload a photo of it.")
     job = OBJECTS.create_object(prompt, scene_id=scene_id, seed=int(seed or 0), image=reference)
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None, False, gr.update(visible=False)
+        return (
+            f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}",
+            None,
+            False,
+            gr.update(visible=False),
+        )
     return (
         f"⚙️ Generating **{job.summary}** (job {job.job_id}); this takes a few minutes.",
         job.job_id,
@@ -799,7 +809,7 @@ def on_edit(
     except ValueError as e:
         raise gr.Error(str(e)) from e
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     where = "inside the marked box" if region else "around this view"
     took = _minutes(sum(estimate_edit_breakdown(job.params["budget"]).values()))
     return (
@@ -899,8 +909,10 @@ def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
         prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
     )
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None
+        gr.Warning(f"The preview could not start. {job.error['message']}")
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     note = " The object being placed is not part of it." if placing else ""
+    gr.Info("Preview started. It takes a few minutes; the image appears below the button.")
     return (
         f"⚙️ Rendering this view of v{version.number} and restyling it (job {job.job_id}).{note}",
         job.job_id,
@@ -919,6 +931,7 @@ def on_preview_tick(preview_job: str | None):
     if job.status == "failed":
         err = job.error or {}
         msg = f"❌ **Preview failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        gr.Warning(f"Preview failed. {err.get('message', '')}".strip())
         return [msg, None, *rest]
     if job.status != "done":
         label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
@@ -933,6 +946,7 @@ def on_preview_tick(preview_job: str | None):
         return ["**The preview image is missing.**", None, *rest]
     seconds = job.run.get("seconds")
     took = f" in {format_elapsed(seconds)}" if seconds else ""
+    gr.Info("Preview ready: see the Preview tab.")
     return [
         f"✅ Preview of **{job.summary}** ready{took}. The scene is unchanged.",
         None,
@@ -940,6 +954,138 @@ def on_preview_tick(preview_job: str | None):
         str(styled),
         str(render) if render else None,
     ]
+
+
+# --- Image editing tab ----------------------------------------------------------------
+
+
+def on_image_mode(mode: str):
+    """Show the controls of the chosen mode. Outputs: source, aspect, strength, save-base."""
+    with_image = mode == images.IMAGE_TO_IMAGE
+    return (
+        gr.update(visible=with_image),
+        gr.update(visible=not with_image),
+        gr.update(visible=with_image),
+        gr.update(visible=with_image),
+    )
+
+
+def on_image(mode, prompt, source, aspect, strength, seed):
+    prompt = (prompt or "").strip()
+    with_image = mode == images.IMAGE_TO_IMAGE
+    if not prompt:
+        example = "the same roof covered in wildflowers" if with_image else "a green roof"
+        raise gr.Error(f"Describe the image first, e.g. '{example}'.")
+    kwargs = {"seed": int(seed or 0)}
+    if with_image:
+        try:
+            kwargs.update(source=validate_source_image(source), strength=float(strength))
+        except UploadError as e:
+            raise gr.Error(str(e)) from e
+    else:
+        kwargs["aspect"] = images.aspect_of(aspect)
+    job = IMAGES.create_image(prompt, **kwargs)
+    if job.status == "failed":
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
+    what = "Changing your image" if with_image else "Making the image"
+    return f"⚙️ {what} (job {job.job_id}).", job.job_id
+
+
+def on_image_tick(image_job: str | None):
+    """Poll the image job. Outputs: status, image_job, result, use-as-input button."""
+    rest = [gr.skip()] * 2
+    if not image_job:
+        return [gr.skip(), gr.skip(), *rest]
+    job = IMAGES.get(image_job)
+    job = IMAGES.refresh(job) if job else None
+    if job is None:
+        return ["The image job was not found.", None, *rest]
+    if job.status == "failed":
+        err = job.error or {}
+        msg = f"❌ **Image failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        return [msg, None, *rest]
+    if job.status != "done":
+        label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Generating"
+        elapsed = format_elapsed(job.elapsed(IMAGES.clock()))
+        return [f"{label}: **{job.summary}** ({elapsed})", gr.skip(), *rest]
+    try:
+        result = STORE.download(image_result_path(job))
+    except Exception as e:
+        return [f"**The image could not be fetched** ({type(e).__name__}).", None, *rest]
+    if result is None:
+        return ["**The image is missing.**", None, *rest]
+    seconds = job.run.get("seconds")
+    took = f" in {format_elapsed(seconds)}" if seconds else ""
+    return [
+        f"✅ **{job.summary}** ready{took}.",
+        None,
+        str(result),
+        gr.update(interactive=True),
+    ]
+
+
+def on_use_result(result: str | None):
+    """Continue from the last result. Outputs: mode, source, aspect, strength."""
+    if not result:
+        raise gr.Error("Generate an image first.")
+    return images.IMAGE_TO_IMAGE, result, *on_image_mode(images.IMAGE_TO_IMAGE)[1:]
+
+
+def on_save_base(source: str | None):
+    """Store the input image unchanged. Outputs: status, image_job, result, use-as-input."""
+    try:
+        image = validate_source_image(source)
+    except UploadError as e:
+        raise gr.Error(str(e)) from e
+    job = IMAGES.save_image(image)
+    return (
+        f"✅ Saved unchanged as a base (job {job.job_id}). Find it under "
+        '"Earlier images" below, or write a prompt and generate from it.',
+        None,
+        str(image),
+        gr.update(interactive=True),
+    )
+
+
+IMAGE_MODE_LABEL = {"image": "edited", "text": "from text", "upload": "base, unchanged"}
+
+
+def on_image_history():
+    """Finished images, newest first. Outputs: gallery items (image, caption), paths, note."""
+    items, missing, errors = [], 0, []
+    try:
+        finished = [j for j in IMAGES.list(refresh=False) if j.status == "done" and j.scene_path]
+    except Exception as e:
+        return [], [], f"⚠️ The image list could not be read ({type(e).__name__}: {str(e)[:150]})."
+    for job in finished[:24]:
+        try:
+            path = STORE.download(image_result_path(job))
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {str(e)[:150]}")
+            continue
+        if not path:
+            missing += 1
+        else:
+            mode = job.params.get("mode", "text")
+            label = IMAGE_MODE_LABEL.get(mode, mode)
+            seed = "" if mode == "upload" else f", seed {job.params.get('seed', 0)}"
+            items.append((str(path), f"{job.summary} ({label}{seed})"))
+    note = f"{len(items)} of {len(finished)} finished images shown (newest first)."
+    if not finished:
+        note = "No finished images yet."
+    if missing:
+        note += f" {missing} file(s) missing in the dataset."
+    if errors:
+        note += f" {len(errors)} could not be fetched, e.g. {errors[0]}"
+    return items, [p for p, _ in items], note
+
+
+def on_pick_earlier(paths: list[str] | None, evt: gr.SelectData):
+    """Use a clicked earlier image as the input. Outputs: mode, source, aspect, strength."""
+    if not paths or evt.index is None or evt.index >= len(paths):
+        raise gr.Error("Show the earlier images again, then pick one.")
+    gr.Info("Picked as input image. Write a prompt and generate.")
+    return on_use_result(paths[evt.index])
 
 
 def on_download(job_id: str | None, number: int | None, kind: str):
@@ -962,7 +1108,10 @@ def on_create(files: list[str] | None):
         return f"**Upload rejected.** {e}", jobs_table()
     job = JOBS.create(upload)
     if job.status == "failed":
-        return f"**Could not start the job.** {job.error['message']}", jobs_table()
+        return (
+            f"**Could not start the job.** {job.error['message']} {job.error.get('tip', '')}",
+            jobs_table(),
+        )
     return f"**Job {job.job_id} started.** It appears in the list below.", jobs_table()
 
 
@@ -998,7 +1147,8 @@ def build() -> gr.Blocks:
         obj_job, placing, floor = gr.State(None), gr.State(False), gr.State(None)
         moving = gr.State(None)  # id of the placed object being moved, if any
         obj_keys, edit_numbers = gr.State([]), gr.State([])
-        preview_job, edit_job = gr.State(None), gr.State(None)
+        preview_job, edit_job, image_job = gr.State(None), gr.State(None), gr.State(None)
+        image_paths = gr.State([])
 
         with gr.Tabs(selected="new") as tabs:
             # --- New scene: upload, create, jobs -----------------------------------
@@ -1161,6 +1311,55 @@ def build() -> gr.Blocks:
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
+
+            # --- Image editing: 2D images, no scene needed ----------------------------
+            with gr.Tab("Image editing", id="image") as image_tab:
+                gr.Markdown(
+                    "Make an image from a text, or change an image you upload. "
+                    "This works without a scene and changes no scene."
+                )
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=2):
+                        im_mode = gr.Radio(
+                            list(images.MODES), value=images.TEXT_TO_IMAGE, label="Mode"
+                        )
+                        im_source = gr.Image(
+                            label="Input image (PNG, JPG or WebP, up to 20 MB)",
+                            type="filepath", sources=["upload", "clipboard"], height=260,
+                            visible=False,
+                        )  # fmt: skip
+                        im_prompt = gr.Textbox(
+                            label="Prompt",
+                            lines=3,
+                            placeholder="Text to image: describe the whole picture. "
+                            "With an image: describe how it should look afterwards.",
+                        )
+                        im_aspect = gr.Dropdown(
+                            list(images.ASPECTS), value=images.DEFAULT_ASPECT, label="Format"
+                        )
+                        im_strength = gr.Slider(
+                            0.2, 0.95, value=0.6, step=0.05, visible=False,
+                            label="Change (low keeps more of the input)",
+                        )  # fmt: skip
+                        with gr.Row():
+                            im_seed = gr.Number(label="Seed", value=0, precision=0)
+                            im_go = gr.Button("Generate image", variant="primary")
+                        im_keep = gr.Button("Save as base (no change)", visible=False)
+                        im_status = gr.Markdown()
+                    with gr.Column(scale=3):
+                        im_result = gr.Image(
+                            label="Result (download with the arrow)",
+                            interactive=False, format="png", height=520,
+                        )  # fmt: skip
+                        im_again = gr.Button("Use result as input", interactive=False)
+                gr.Markdown("### Earlier images")
+                with gr.Row(equal_height=True):
+                    im_history_note = gr.Markdown()
+                    im_history_go = gr.Button("Refresh list", scale=0, min_width=140)
+                im_history = gr.Gallery(
+                    label="Generated and saved images (click one to use it as the input)",
+                    columns=6, height=320, object_fit="cover", allow_preview=False,
+                )  # fmt: skip
         sliders = [px, py, pz, pturn, psize, ptilt_x, ptilt_y]  # order of Placement's fields
         end = [place_group, placing, obj_job, moving]
         scene_outputs = [version, hidden, viewer, download, shown, history_table, *end]
@@ -1284,6 +1483,29 @@ def build() -> gr.Blocks:
         )
         # A started or finished preview adds a line to the prompt log.
         pv_status.change(*log)
+
+        # Image editing
+        mode_outputs = [im_source, im_aspect, im_strength, im_keep]
+        im_mode.change(on_image_mode, im_mode, mode_outputs)
+        clicked(
+            im_go,
+            "⏳ Starting…",
+            on_image,
+            [im_mode, im_prompt, im_source, im_aspect, im_strength, im_seed],
+            [im_status, image_job],
+        )
+        gr.Timer(5).tick(on_image_tick, image_job, [im_status, image_job, im_result, im_again])
+        im_again.click(on_use_result, im_result, [im_mode, im_source, *mode_outputs[1:]])
+        clicked(
+            im_keep, "⏳ Saving…", on_save_base, im_source,
+            [im_status, image_job, im_result, im_again],
+        )  # fmt: skip
+        history_out = [im_history, image_paths, im_history_note]
+        clicked(im_history_go, "⏳ Loading…", on_image_history, None, history_out)
+        # Load the list when the tab opens, and again whenever a new result arrives.
+        image_tab.select(on_image_history, None, history_out)
+        im_result.change(on_image_history, None, history_out)
+        im_history.select(on_pick_earlier, image_paths, [im_mode, im_source, *mode_outputs[1:]])
 
         # Downloads (always the full files, whatever is hidden)
         clicked(

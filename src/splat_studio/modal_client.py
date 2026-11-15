@@ -88,3 +88,24 @@ def submit_preview(
         seed=seed,
         strength=strength,
     )
+
+
+def submit_image(
+    job_id: str,
+    prompt: str,
+    seed: int = 0,
+    source_path: str | None = None,
+    strength: float = 0.7,
+    aspect: float = 1.0,
+) -> str:
+    """Text-to-image, or image-to-image when `source_path` (a dataset path) is given."""
+    return spawn_method(
+        "ImageStudio",
+        "generate",
+        job_id,
+        prompt,
+        seed=seed,
+        source_path=source_path,
+        strength=strength,
+        aspect=aspect,
+    )

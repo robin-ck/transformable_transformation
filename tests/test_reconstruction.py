@@ -213,6 +213,7 @@ def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
         {"region": None, "seed": 0, "budget": {"steps": 900}},
     )
     calls.pop()
+    assert modal_client.submit_image("j4", "roof", source_path="images/j4/input/s.png") == "fc-9"
     assert calls == [
         ("ObjectGenerator", "generate", ("j1", "oak"), {"seed": 2}),
         (
@@ -226,6 +227,12 @@ def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
             "render",
             ("j2", "scenes/s/v1", {"fov": 50}, "warm light"),
             {"seed": 0, "strength": 0.7},
+        ),
+        (
+            "ImageStudio",
+            "generate",
+            ("j4", "roof"),
+            {"seed": 0, "source_path": "images/j4/input/s.png", "strength": 0.7, "aspect": 1.0},
         ),
     ]
 

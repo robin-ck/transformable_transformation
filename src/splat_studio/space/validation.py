@@ -90,16 +90,28 @@ MAX_OBJECT_IMAGE_BYTES = 20 * 1024 * 1024
 OBJECT_IMAGE_HELP = "Use one PNG, JPG or WebP photo of the object, up to 20 MB."
 
 
-def validate_object_image(path: str | Path | None) -> Path:
-    """Return the reference image for Add object if it is usable, else raise UploadError."""
+def _validate_image(path: str | Path | None, help_text: str) -> Path:
     if not path:
-        raise UploadError(f"No image uploaded. {OBJECT_IMAGE_HELP}")
+        raise UploadError(f"No image uploaded. {help_text}")
     image = Path(path)
     if image.suffix.lower() not in OBJECT_IMAGE_EXT:
-        raise UploadError(f"Unsupported image type: {image.name}. {OBJECT_IMAGE_HELP}")
+        raise UploadError(f"Unsupported image type: {image.name}. {help_text}")
     if image.stat().st_size > MAX_OBJECT_IMAGE_BYTES:
         raise UploadError(
             f"The image is {_mb(image.stat().st_size)}; the limit is "
-            f"{_mb(MAX_OBJECT_IMAGE_BYTES)}. {OBJECT_IMAGE_HELP}"
+            f"{_mb(MAX_OBJECT_IMAGE_BYTES)}. {help_text}"
         )
     return image
+
+
+def validate_object_image(path: str | Path | None) -> Path:
+    """Return the reference image for Add object if it is usable, else raise UploadError."""
+    return _validate_image(path, OBJECT_IMAGE_HELP)
+
+
+SOURCE_IMAGE_HELP = "Use one PNG, JPG or WebP image, up to 20 MB."
+
+
+def validate_source_image(path: str | Path | None) -> Path:
+    """Return the input image for the Image editing tab if usable, else raise UploadError."""
+    return _validate_image(path, SOURCE_IMAGE_HELP)

@@ -100,6 +100,14 @@ def preview_failed(detail: str) -> ReconstructionError:
     )
 
 
+def image_failed(detail: str) -> ReconstructionError:
+    return ReconstructionError(
+        "image_failed",
+        "Making the image failed on the GPU. Please try again, or reword the prompt.",
+        f"Technical detail: {detail[-300:]}" if detail else "",
+    )
+
+
 def preview_empty() -> ReconstructionError:
     return ReconstructionError(
         "preview_empty",
