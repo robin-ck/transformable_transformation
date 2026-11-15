@@ -20,8 +20,10 @@ Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now 
   - Checked on modal 1.6.4: `App.cls` takes `scaledown_window`, `max_containers`; `modal.enter`, `modal.method`, `Cls.from_name` exist. The app loads locally and registers both classes.
 - [x] 1.2 `ObjectGenerator` class: models in `@modal.enter`, `generate()` method; drop prefetch thread and `del flux`
   - If loading fails in `enter`, the container stays up and the next job loads again, so a gated-model error still reaches the user as today.
-- [ ] 1.3 Check GPU memory with FLUX + TRELLIS resident; apply fallbacks from design.md if needed
-  - Prepared: `run.json` of object jobs now has `gpu_mem_peak_gb` and `gpu_mem_total_gb`. Needs one deployed run.
+- [x] 1.3 Check GPU memory with FLUX + TRELLIS resident; apply fallbacks from design.md if needed
+  - 2026-11-15, job `20261115-130233-5da883` (L40S, cold, "add a plant onto the table"): peak 39.1 of 44.4 GB usable with both resident. Fits; no fallback needed, but only about 5 GB headroom.
+  - Same run: start wait 129.2 s (container start plus `enter`: imports 74.5, load FLUX 21.6, load TRELLIS 25.9), job 18.6 s (image 2.7, gaussians 8.0, simplify 0.7, upload 6.9), click to finish 149.5 s. Baseline job time was 124.1 s.
+  - Note: `est_cost_usd` counts only the job, not the load in `enter` or idle time.
 - [x] 1.4 `PreviewRenderer` class: SDXL + ControlNet in `@modal.enter`, `render()` method
   - Added: `enter` also renders a 16-Gaussian scene to build gsplat's kernels (stage `compile_gsplat`), since 0.1 shows the first render, not model loading, dominates the preview.
 - [x] 1.5 `RunLog`: `warm` flag; load stages only on the loading call
