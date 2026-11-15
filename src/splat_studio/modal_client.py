@@ -22,6 +22,12 @@ def spawn(function_name: str, *args: Any, **kwargs: Any) -> str:
     return fn.spawn(*args, **kwargs).object_id
 
 
+def spawn_method(class_name: str, method: str, *args: Any, **kwargs: Any) -> str:
+    """Start a method of a deployed Modal class in the background; returns its call id."""
+    cls = _modal().Cls.from_name(APP_NAME, class_name)
+    return getattr(cls(), method).spawn(*args, **kwargs).object_id
+
+
 def poll(call_id: str) -> tuple[str, dict | None]:
     """Return ("running", None) or ("finished", result) without blocking.
 
@@ -44,7 +50,7 @@ def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
 
 
 def submit_object(job_id: str, prompt: str, seed: int = 0) -> str:
-    return spawn("generate_object", job_id, prompt, seed=seed)
+    return spawn_method("ObjectGenerator", "generate", job_id, prompt, seed=seed)
 
 
 def submit_edit(
@@ -62,4 +68,13 @@ def submit_edit(
 def submit_preview(
     job_id: str, scene_path: str, camera: dict, prompt: str, seed: int = 0, strength: float = 0.7
 ) -> str:
-    return spawn("render_preview", job_id, scene_path, camera, prompt, seed=seed, strength=strength)
+    return spawn_method(
+        "PreviewRenderer",
+        "render",
+        job_id,
+        scene_path,
+        camera,
+        prompt,
+        seed=seed,
+        strength=strength,
+    )
