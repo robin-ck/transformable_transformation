@@ -767,8 +767,8 @@ def on_budget_slider(*values):
 
 
 def on_edit(
-    camera_json, scene_id, prompt, region_on, seed, number, placing,
-    n_views, steps, edit_every, denoise_steps,
+    camera_json, scene_id, prompt, region_on, seed,
+    n_views, steps, edit_every, denoise_steps, number, placing,
 ):  # fmt: skip
     version = _version(scene_id, number)
     if version is None:
@@ -1255,7 +1255,9 @@ def build() -> gr.Blocks:
             ed_go,
             "⏳ Starting…",
             on_edit,
-            [camera_json, picker, ed_prompt, ed_region, ed_seed, version, placing, *ed_budget],
+            # States (version, placing) go last: GET_CAMERA_JS never sees them, so any input
+            # after them would be shifted.
+            [camera_json, picker, ed_prompt, ed_region, ed_seed, *ed_budget, version, placing],
             [ed_status, edit_job],
             js=GET_CAMERA_JS,
         )
