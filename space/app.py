@@ -25,9 +25,13 @@ from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa
 from splat_studio.editing.scene_edit import RegionError, region_from_viewer  # noqa: E402
 from splat_studio.space import prompt_log  # noqa: E402
 from splat_studio.space.add_object import (  # noqa: E402
+    EDIT_COLUMNS,
+    OBJECT_COLUMNS,
     PlaceError,
-    library_choices,
-    object_choices,
+    edit_rows,
+    move_object,
+    object_placement,
+    object_rows,
     place_object,
     start_placement,
 )
@@ -59,6 +63,7 @@ from splat_studio.space.versions import (  # noqa: E402
     history_rows,
     list_versions,
     version_from_row,
+    view_splat,
 )
 from splat_studio.space.viewer import camera_from_json, scene_html  # noqa: E402
 
@@ -120,7 +125,13 @@ def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
 
 
 def scene_choices(jobs: list[Job]) -> list[tuple[str, str]]:
-    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in jobs if j.status == "done"]
+    """Finished scenes, oldest first (`jobs` is newest first).
+
+    New scenes go at the end: Gradio's dropdown marks its selection by position, so
+    putting a new scene first made it look selected and picking it did nothing.
+    """
+    done = [j for j in jobs if j.status == "done"]
+    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in reversed(done)]
 
 
 def refresh_all(current: str | None):
@@ -147,12 +158,12 @@ def _version(job_id: str | None, number: int | None) -> Version | None:
 
 
 def _end_placement(obj_job: str | None, placing: bool):
-    """Outputs that leave placement mode: (place_group, placing, obj_job).
+    """Outputs that leave placement mode: (place_group, placing, obj_job, moving).
 
     A finished object is dropped (nothing was saved); a job still generating is kept,
     and its object is shown on whichever version is picked when it is done.
     """
-    return gr.update(visible=False), False, (None if placing else obj_job)
+    return gr.update(visible=False), False, (None if placing else obj_job), None
 
 
 def _shown(version: Version | None) -> str:
@@ -163,29 +174,14 @@ def _shown(version: Version | None) -> str:
     return f"Showing **v{version.number}** · {what}{prompt}"
 
 
-def _objects_control(version: Version | None):
-    """Show/hide checkboxes for the objects of a version (all shown at first)."""
-    choices = object_choices(version)
-    label = OBJECTS_LABEL if choices else OBJECTS_NONE
-    return gr.update(choices=choices, value=[v for _, v in choices], label=label)
-
-
-def on_library(scene_id: str | None):
-    """Objects generated for this scene, to add again. Outputs: library dropdown, add button."""
-    choices = library_choices(OBJECTS.list(refresh=False), scene_id)
-    value = choices[0][1] if choices else None
-    return gr.update(choices=choices, value=value), gr.update(interactive=bool(choices))
-
-
-OBJECTS_LABEL = "Objects in this version (untick to hide; view only, downloads keep all)"
-OBJECTS_NONE = "Objects in this version: none yet (generate one below)"
-
-
 def _hidden_splat(version: Version | None, hidden: list[str] | None):
-    """Local `.splat` without the hidden objects, or None to use the version's own file."""
+    """Local `.splat` without the hidden objects and edits, or None to use the version's
+    own file."""
     if version is None or not hidden:
         return None
     try:
+        if any(str(h).startswith("e") for h in hidden):
+            return view_splat(STORE, version, _versions(version.scene_id), hidden)
         return filtered_splat(STORE, version, hidden)
     except Exception:  # fall back to the full scene rather than break the viewer
         return None
@@ -194,8 +190,8 @@ def _hidden_splat(version: Version | None, hidden: list[str] | None):
 def scene_view(job_id: str | None, number: int | None, obj_job: str | None, placing: bool):
     """Open a version (newest if `number` is None) of a scene; outputs `SCENE_OUTPUTS`.
 
-    (version, hidden, viewer, download, shown, objects, history table, place_group,
-    placing, obj_job)
+    (version, hidden, viewer, download, shown, history table, place_group, placing,
+    obj_job, moving)
     """
     job, versions = _scene(job_id)
     version = next((v for v in versions if v.number == number), None) if number else None
@@ -207,7 +203,6 @@ def scene_view(job_id: str | None, number: int | None, obj_job: str | None, plac
         scene_html(STORE, version.path if version else None),
         gr.update(value=None, visible=False),
         _shown(version),
-        _objects_control(version),
         gr.update(value=rows),
         *_end_placement(obj_job, placing),
     )
@@ -253,7 +248,7 @@ def on_load(obj_job: str | None, placing: bool):
     """
     jobs = JOBS.list()
     choices = scene_choices(jobs)
-    newest = choices[0][1] if choices else None  # the listing is newest first
+    newest = choices[-1][1] if choices else None
     return (
         gr.Tabs(selected="scene" if newest else "new"),
         jobs_table(jobs),
@@ -266,37 +261,28 @@ def on_load(obj_job: str | None, placing: bool):
 def on_tick(current: str | None, seen: list[str] | None):
     """Refresh jobs and picker; announce scenes that finished since the last listing.
 
-    The notice never changes the open scene; "Open newest scene" does that on request.
+    The notice never changes the open scene; picking it in the scene list opens it.
     """
     jobs = JOBS.list()
-    choices = scene_choices(jobs)
-    value = current if current in {v for _, v in choices} else None
     done = _done_ids(jobs)
+    if seen is not None and set(done) == set(seen):
+        picker = gr.skip()  # unchanged: do not redraw the list while it may be open
+    else:
+        choices = scene_choices(jobs)
+        value = current if current in {v for _, v in choices} else None
+        picker = gr.update(choices=choices, value=value)
     if seen is not None:
         for job in jobs:
             if job.job_id in set(done) - set(seen):
                 gr.Info(
                     f"Scene {job.job_id} ({job.summary}) is ready. "
-                    "Click 'Open newest scene' in the Scene tab to view it.",
+                    "Pick it in the 'Finished scene' list of the Scene tab to view it.",
                     duration=15,
                 )
-    return jobs_table(jobs), gr.update(choices=choices, value=value), done
+    return jobs_table(jobs), picker, done
 
 
-def on_open_newest(obj_job: str | None, placing: bool):
-    """Outputs: tabs, picker, then `SCENE_OUTPUTS`."""
-    choices = scene_choices(JOBS.list())
-    if not choices:
-        raise gr.Error("No finished scene yet.")
-    newest = choices[0][1]
-    return (
-        gr.Tabs(selected="scene"),
-        gr.update(choices=choices, value=newest),
-        *scene_view(newest, None, obj_job, placing),
-    )
-
-
-# --- hide objects (redesign-space-gui 4.3) -------------------------------------------
+# --- objects and edits tables ------------------------------------------------------
 
 
 def _placement_cfg(placement: Placement, floor: float | None, visible: bool) -> dict:
@@ -307,29 +293,185 @@ def _placement_cfg(placement: Placement, floor: float | None, visible: bool) -> 
     return cfg
 
 
-def on_objects_shown(
-    camera_json, scene_id, number, shown, obj_job, placing, floor, show_obj,
-    x, y, z, turn, size, tilt_x, tilt_y,
-):  # fmt: skip
-    """Reload the viewer without the unticked objects; keeps the camera and placement.
-
-    Outputs: hidden, viewer.
-    """
+def on_tables(scene_id, number, hidden, moving):
+    """Objects and edits tables of the open version. Outputs: objects, keys, edits, numbers."""
     version = _version(scene_id, number)
-    if version is None:
-        return [], gr.skip()
-    hidden = [o["id"] for o in version.objects if o["id"] not in set(shown or [])]
-    camera = camera_from_json(camera_json)
+    jobs = OBJECTS.list(refresh=False)
+    rows, keys = object_rows(version, hidden, jobs, scene_id, moving)
+    edits = [j for j in EDITS.list(refresh=False) if j.params.get("scene_id") == scene_id]
+    e_rows, numbers = edit_rows(_versions(scene_id), edits, number, hidden)
+    return gr.update(value=rows), keys, gr.update(value=e_rows), numbers
+
+
+def _reload(camera_json, version, hidden, obj_job, placing, moving, floor, show_obj, values):
+    """Viewer of `version` without the hidden objects (and the one being moved), keeping
+    the camera and any object being placed (at `values`, from the viewer)."""
+    drop = [*hidden, moving] if moving else list(hidden)
     obj_path = cfg = None
     job = OBJECTS.get(obj_job) if (placing and obj_job) else None
-    if job is not None and job.scene_path:
+    if job is not None and job.scene_path and values is not None:
         obj_path = job.scene_path
-        cfg = _placement_cfg(Placement(x, y, z, turn, size, tilt_x, tilt_y), floor, show_obj)
-    viewer = scene_html(
+        cfg = _placement_cfg(Placement(*values), floor, show_obj)
+    return scene_html(
         STORE, version.path, object_path=obj_path, placement=cfg,
-        splat=_hidden_splat(version, hidden), camera=camera,
+        splat=_hidden_splat(version, drop), camera=camera_from_json(camera_json),
     )  # fmt: skip
-    return hidden, viewer
+
+
+def _slider_updates(placement: Placement, ranges) -> list:
+    """Sliders set to `placement`, with ranges widened so the value always fits."""
+
+    def fit(lo_hi, v):
+        lo, hi = lo_hi
+        return gr.update(minimum=min(lo, v), maximum=max(hi, v), value=v)
+
+    p = placement
+    return [
+        fit(ranges.x, p.x), fit(ranges.y, p.y), fit(ranges.z, p.z),
+        gr.update(value=p.turn_deg), fit(ranges.size, p.size),
+        gr.update(value=p.tilt_x_deg), gr.update(value=p.tilt_y_deg),
+    ]  # fmt: skip
+
+
+def on_object_select(
+    camera_json, scene_id, show_obj, number, hidden, obj_job, placing, moving, floor, keys,
+    evt: gr.SelectData,
+):  # fmt: skip
+    """A click in the objects table.
+
+    Action cell of a placed object: hide or show it (view only). Any other cell of a
+    placed object: move or resize it. A generated object: add a copy to the scene.
+    Outputs: status, hidden, viewer, obj_job, placing, moving, place_group, reference,
+    floor, 7 sliders.
+    """
+    skip = [gr.skip()] * 16
+    row, col = (evt.index if isinstance(evt.index, (list, tuple)) else (evt.index, 0))[:2]
+    keys = keys or []
+    if not 0 <= row < len(keys):
+        return skip
+    kind, key = keys[row]
+    hidden = list(hidden or [])
+    version = _version(scene_id, number)
+    if version is None:
+        raise gr.Error("Pick a finished scene first.")
+    try:
+        values = parse_placement(json.dumps(json.loads(camera_json or "{}").get("placement")))
+    except (ValueError, AttributeError):
+        values = None
+    if kind == "job":
+        return ["This object is still generating (or failed); it can be added when done.",
+                *skip[1:]]  # fmt: skip
+    if kind == "placed" and key == moving:
+        return ["Move it in the viewer or with the sliders, then save or cancel.", *skip[1:]]
+    if kind == "placed" and col == len(OBJECT_COLUMNS) - 1:
+        # Follow the clicked label, not a toggle: one click can fire `select` twice.
+        if "Show" in str(evt.value):
+            hidden = [h for h in hidden if h != key]
+        elif key not in hidden:
+            hidden = [*hidden, key]
+        viewer = _reload(
+            camera_json, version, hidden, obj_job, placing, moving, floor, show_obj, values
+        )
+        return [gr.skip(), hidden, viewer, *skip[3:]]
+    if placing and kind == "library" and key == obj_job and not moving:
+        return skip  # the same click again (see above)
+    if placing:
+        raise gr.Error("Save or cancel the current object first.")
+    if kind == "library":
+        out = on_object_tick(key, False, scene_id, number, hidden, show_obj)
+        out[1] = key
+        # status, hidden, viewer, obj_job, placing, moving, group, ref, floor, sliders
+        return [out[0], gr.skip(), out[3], out[1], out[2], None, *out[4:]]
+    obj = next((o for o in version.objects if o["id"] == key), None)
+    placement = object_placement(obj) if obj else None
+    if obj is None or placement is None or not obj.get("object_job"):
+        raise gr.Error("This object was placed before positions were saved; it can only be hidden.")
+    job = OBJECTS.get(obj["object_job"])
+    if job is None or not job.scene_path:
+        raise gr.Error("The generated object for this entry is missing; it can only be hidden.")
+    try:
+        _, ranges = start_placement(STORE, version)
+    except PlaceError as e:
+        raise gr.Error(str(e)) from e
+    reference = STORE.download(f"{job.scene_path}/reference.png")
+    viewer = scene_html(
+        STORE, version.path, object_path=job.scene_path,
+        placement=_placement_cfg(placement, ranges.floor, show_obj),
+        splat=_hidden_splat(version, [*hidden, key]), camera=camera_from_json(camera_json),
+    )  # fmt: skip
+    name = obj.get("prompt") or "object"
+    return [
+        f"✋ Moving **{name}**. Drag it in the viewer (Shift-drag turns, Alt-drag tilts) or "
+        "use the sliders, then save it as a new version or cancel.",
+        gr.skip(), viewer, job.job_id, True, key, gr.update(visible=True),
+        str(reference) if reference else None, ranges.floor,
+        *_slider_updates(placement, ranges),
+    ]  # fmt: skip
+
+
+# Like GET_CAMERA_JS, and also asks the viewer for the placement of an object being
+# placed (only then does it answer): the sliders are not inputs, since a hidden group
+# has no values.
+OBJECT_SELECT_JS = """async (...args) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  const ask = (type, reply, ms) => new Promise((resolve) => {
+    if (!f || !f.contentWindow) return resolve(null);
+    const id = Math.random().toString(36).slice(2);
+    const on = (e) => { const d = e.data; if (d && d.type === reply && d.id === id) done(d); };
+    const done = (v) => { window.removeEventListener("message", on); resolve(v); };
+    window.addEventListener("message", on);
+    f.contentWindow.postMessage({type, id}, "*");
+    setTimeout(() => done(null), ms);
+  });
+  const camera = await ask("get_camera", "camera", 3000);
+  const placement = await ask("get_placement", "placement", 400);
+  const out = camera ? {...camera, placement} : (placement ? {placement} : null);
+  return [out ? JSON.stringify(out) : "", ...args.slice(1)];
+}"""
+
+
+def on_edit_select(
+    camera_json, scene_id, show_obj, number, hidden, keys, obj_job, placing, moving, floor,
+    evt: gr.SelectData,
+):  # fmt: skip
+    """A click in the edits table. Outputs: `SCENE_OUTPUTS`.
+
+    Hide/Show on an edit the shown version builds on: view the scene without it (its
+    parent plus the objects placed later; view only). Open on another edit, or a click
+    elsewhere in its row: open that edit's version.
+    """
+    skip = [gr.skip()] * 10
+    row, col = (evt.index if isinstance(evt.index, (list, tuple)) else (evt.index, 0))[:2]
+    kind, edit = keys[row] if keys and 0 <= row < len(keys) else ("job", None)
+    if edit is None:
+        return skip
+    action = str(evt.value)
+    if kind == "line" and col == len(EDIT_COLUMNS) - 1 and ("Hide" in action or "Show" in action):
+        version = _version(scene_id, number)
+        if version is None:
+            return skip
+        key = f"e{edit}"
+        hidden = list(hidden or [])
+        # Follow the clicked label, not a toggle: one click can fire `select` twice.
+        if "Show" in action:
+            hidden = [h for h in hidden if h != key]
+        elif key not in hidden:
+            hidden = [*hidden, key]
+        try:
+            values = parse_placement(json.dumps(json.loads(camera_json or "{}").get("placement")))
+        except (ValueError, AttributeError):
+            values = None
+        viewer = _reload(
+            camera_json, version, hidden, obj_job, placing, moving, floor, show_obj, values
+        )
+        out = list(skip)
+        out[1], out[2] = hidden, viewer
+        return out
+    if placing:
+        raise gr.Error("Save or cancel the current object first.")
+    if edit == number and not hidden:
+        return skip  # already shown
+    return scene_view(scene_id, edit, obj_job, placing)
 
 
 # --- add object (task 4.2; click and drag from redesign-space-gui 3) ------------------
@@ -352,9 +494,12 @@ SHOW_OBJECT_JS = """(visible) => {
   return [visible];
 }"""
 
-# "Place in new version" asks the viewer for its placement first, so the merged object
+# Gradio maps a js hook's return values onto the inputs that are not `gr.State`, in
+# order, so every hooked event lists its State inputs last.
+
+# "Save as new version" asks the viewer for its placement first, so the merged object
 # lands where the user last saw it even if a drag never reached the sliders.
-# Inputs: scene, version, obj_job, x, y, z, turn, size, tilt x, tilt y.
+# Inputs: x, y, z, turn, size, tilt x, tilt y, then scene and States.
 PLACE_JS = """async (...args) => {
   const f = document.querySelector("iframe.splat-viewer");
   if (!f || !f.contentWindow) return args;
@@ -369,11 +514,9 @@ PLACE_JS = """async (...args) => {
     f.contentWindow.postMessage({type: "get_placement", id}, "*");
     setTimeout(() => done(null), 2000);
   });
-  if (!p) return args;
-  const out = args.slice();
-  [out[3], out[4], out[5], out[6], out[7], out[8], out[9]] =
-    [p.x, p.y, p.z, p.turn, p.size, p.tiltX, p.tiltY];
-  return out;
+  const vals = p && [p.x, p.y, p.z, p.turn, p.size, p.tiltX, p.tiltY];
+  if (!vals || !vals.every(Number.isFinite)) return args;  // keep the sliders' values
+  return [...vals, ...args.slice(7)];
 }"""
 
 # Page-level listener: the viewer posts `placement_changed` after a click or drag; the
@@ -413,11 +556,18 @@ def parse_placement(text: str | None) -> tuple[float, ...] | None:
 
 
 def on_generate(
-    scene_id: str | None, number: int | None, prompt: str, seed: float | None, image: str | None
+    scene_id: str | None,
+    number: int | None,
+    prompt: str,
+    seed: float | None,
+    image: str | None,
+    placing: bool,
 ):
     """Start an object job from the text, or from an uploaded photo if there is one."""
     if _version(scene_id, number) is None:
         raise gr.Error("Pick a finished scene first.")
+    if placing:
+        raise gr.Error("Save or cancel the current object first.")
     prompt = (prompt or "").strip()
     reference = None
     if image:
@@ -481,7 +631,8 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
     )
     return [
         f"✅ **{job.summary}** is ready. Click the scene to put it there, drag it to move "
-        "(Shift-drag turns it, Alt-drag tilts it), or use the sliders. Then place it or cancel.",
+        "(Shift-drag turns it, Alt-drag tilts it), or use the sliders. Then save it as a "
+        "new version or cancel.",
         gr.skip(),
         True,
         viewer,
@@ -498,43 +649,38 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
     ]
 
 
-def on_add_again(choice, placing, scene_id, number, hidden, show_obj):
-    """Place an object generated earlier, without generating it again.
-
-    Outputs: as `on_object_tick`.
-    """
-    if not choice:
-        raise gr.Error("Pick an object from the list first.")
-    if placing:
-        raise gr.Error("Place or cancel the current object first.")
-    out = on_object_tick(choice, False, scene_id, number, hidden, show_obj)
-    out[1] = choice
-    return out
-
-
 def on_place(
-    scene_id, number, obj_job, x, y, z, turn, size, tilt_x, tilt_y,
+    x, y, z, turn, size, tilt_x, tilt_y, scene_id, number, obj_job, moving,
     progress=gr.Progress(),  # noqa: B008 - Gradio's progress idiom
 ):  # fmt: skip
-    """Merge the object; opens the new version. Outputs: status, then `SCENE_OUTPUTS`."""
+    """Merge the object (or move a placed one); opens the new version.
+
+    Outputs: status, then `SCENE_OUTPUTS`.
+    """
     version = _version(scene_id, number)
     job = OBJECTS.get(obj_job) if obj_job else None
     if version is None or job is None:
         raise gr.Error("Nothing to place: generate an object for a picked scene first.")
-    progress(0.1, desc="Merging the object into a new version…")
+    placement = Placement(x, y, z, turn, size, tilt_x, tilt_y)
+    progress(0.1, desc="Saving the scene as a new version…")
     try:
-        new = place_object(STORE, version, job, Placement(x, y, z, turn, size, tilt_x, tilt_y))
+        if moving:
+            new = move_object(STORE, version, moving, placement)
+        else:
+            new = place_object(STORE, version, job, placement)
     except PlaceError as e:
         raise gr.Error(str(e)) from e
     view = list(scene_view(scene_id, new.number, None, False))
-    view[-3:] = [gr.update(visible=False), False, None]
-    return (f"✅ Added **{job.summary}** as v{new.number}.", *view)
+    view[-4:] = [gr.update(visible=False), False, None, None]
+    done = "Moved" if moving else "Added"
+    return (f"✅ {done} **{job.summary}** as v{new.number}.", *view)
 
 
 def on_cancel(camera_json, scene_id, number, hidden):
+    """Outputs: status, viewer, place_group, placing, obj_job, moving."""
     version = _version(scene_id, number)
     return (
-        "Placement cancelled; no new version was made.",
+        "Cancelled; no new version was made.",
         scene_html(
             STORE,
             version.path if version else None,
@@ -543,6 +689,7 @@ def on_cancel(camera_json, scene_id, number, hidden):
         ),  # fmt: skip
         gr.update(visible=False),
         False,
+        None,
         None,
     )
 
@@ -556,7 +703,7 @@ REGION_JS = """(on) => {
 }"""
 
 
-def on_edit(camera_json, scene_id, number, prompt, region_on, seed, placing):
+def on_edit(camera_json, scene_id, prompt, region_on, seed, number, placing):
     version = _version(scene_id, number)
     if version is None:
         raise gr.Error("Pick a finished scene first.")
@@ -659,7 +806,7 @@ GET_CAMERA_JS = """async (...args) => {
 }"""
 
 
-def on_preview(camera_json, scene_id, number, prompt, strength, seed, placing):
+def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
     version = _version(scene_id, number)
     if version is None:
         raise gr.Error("Pick a finished scene first.")
@@ -674,8 +821,10 @@ def on_preview(camera_json, scene_id, number, prompt, strength, seed, placing):
         prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
     )
     if job.status == "failed":
+        gr.Warning(f"The preview could not start. {job.error['message']}")
         return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     note = " The object being placed is not part of it." if placing else ""
+    gr.Info("Preview started. It takes a few minutes; the image appears below the button.")
     return (
         f"⚙️ Rendering this view of v{version.number} and restyling it (job {job.job_id}).{note}",
         job.job_id,
@@ -694,6 +843,7 @@ def on_preview_tick(preview_job: str | None):
     if job.status == "failed":
         err = job.error or {}
         msg = f"❌ **Preview failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        gr.Warning(f"Preview failed. {err.get('message', '')}".strip())
         return [msg, None, *rest]
     if job.status != "done":
         label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
@@ -708,6 +858,7 @@ def on_preview_tick(preview_job: str | None):
         return ["**The preview image is missing.**", None, *rest]
     seconds = job.run.get("seconds")
     took = f" in {format_elapsed(seconds)}" if seconds else ""
+    gr.Info("Preview ready: see the Preview tab.")
     return [
         f"✅ Preview of **{job.summary}** ready{took}. The scene is unchanged.",
         None,
@@ -894,7 +1045,8 @@ button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); 
 button:disabled { cursor: progress !important; }
 #placement-bridge, #camera-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
-#history-table tbody tr { cursor: pointer; }
+#history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr { cursor: pointer; }
+#objects-table td:last-child, #edits-table td:last-child { font-weight: 600; white-space: nowrap; }
 """
 
 
@@ -905,6 +1057,8 @@ def build() -> gr.Blocks:
             gr.Markdown("⚠️ `SPLAT_STUDIO_DATASET` is not set: jobs are stored locally only.")
         version, hidden, seen = gr.State(None), gr.State([]), gr.State(None)
         obj_job, placing, floor = gr.State(None), gr.State(False), gr.State(None)
+        moving = gr.State(None)  # id of the placed object being moved, if any
+        obj_keys, edit_numbers = gr.State([]), gr.State([])
         preview_job, edit_job, image_job = gr.State(None), gr.State(None), gr.State(None)
         image_paths = gr.State([])
 
@@ -929,10 +1083,8 @@ def build() -> gr.Blocks:
                         label="Finished scene",
                         choices=[],
                         value=None,
-                        scale=4,
                         allow_custom_value=True,  # choices are filled in after load
                     )
-                    open_newest = gr.Button("Open newest scene", scale=1)
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=3):
                         viewer = gr.HTML(scene_html(STORE, None))
@@ -955,21 +1107,12 @@ def build() -> gr.Blocks:
                                         headers=prompt_log.COLUMNS, interactive=False, wrap=True
                                     )
                             with gr.Tab("Objects"):
-                                objects_shown = gr.CheckboxGroup(
-                                    label=OBJECTS_LABEL, choices=[], value=[],
+                                objects_table = gr.Dataframe(
+                                    headers=OBJECT_COLUMNS, interactive=False, wrap=True,
+                                    type="array", elem_id="objects-table",
+                                    label="Objects (click a placed one to move or resize it; "
+                                    "Hide is view only, downloads keep all)",
                                 )  # fmt: skip
-                                with gr.Accordion("Generated objects", open=False):
-                                    gr.Markdown(
-                                        "Objects made for this scene before; add one again "
-                                        "without waiting for a new generation."
-                                    )
-                                    with gr.Row(equal_height=True):
-                                        obj_library = gr.Dropdown(
-                                            label="Object", choices=[], value=None, scale=3
-                                        )
-                                        obj_again = gr.Button(
-                                            "Add to scene", scale=1, interactive=False
-                                        )
                                 gr.Markdown("**New object**")
                                 obj_prompt = gr.Textbox(
                                     label="Object", placeholder="a mature oak tree"
@@ -1001,10 +1144,15 @@ def build() -> gr.Blocks:
                                     psize = gr.Slider(0.01, 1, value=0.25, step=0.001, label="Size")
                                     with gr.Row():
                                         place_ok = gr.Button(
-                                            "Place in new version", variant="primary"
+                                            "Save as new version", variant="primary"
                                         )
                                         place_cancel = gr.Button("Cancel")
                             with gr.Tab("Edit scene"):
+                                edits_table = gr.Dataframe(
+                                    headers=EDIT_COLUMNS, interactive=False, wrap=True,
+                                    type="array", elem_id="edits-table",
+                                    label="Edits (Hide: view the scene before it; Open: show it)",
+                                )  # fmt: skip
                                 gr.Markdown(
                                     "Change the scene itself from an instruction; the result "
                                     "is a new version. The edit is strongest around the "
@@ -1098,12 +1246,13 @@ def build() -> gr.Blocks:
                     columns=6, height=320, object_fit="cover", allow_preview=False,
                 )  # fmt: skip
         sliders = [px, py, pz, pturn, psize, ptilt_x, ptilt_y]  # order of Placement's fields
-        end = [place_group, placing, obj_job]
-        scene_outputs = [
-            version, hidden, viewer, download, shown, objects_shown, history_table, *end
-        ]  # fmt: skip
+        end = [place_group, placing, obj_job, moving]
+        scene_outputs = [version, hidden, viewer, download, shown, history_table, *end]
         log = (log_outputs, [picker, version], [history, log_table])
-        lib = (on_library, picker, [obj_library, obj_again])
+        lib = (
+            on_tables, [picker, version, hidden, moving],
+            [objects_table, obj_keys, edits_table, edit_numbers],
+        )  # fmt: skip
 
         # New scene
         files.change(on_upload, files, [message, create])
@@ -1115,37 +1264,39 @@ def build() -> gr.Blocks:
             *log
         ).then(*lib)
         gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
-        clicked(
-            open_newest,
-            "⏳ Opening…",
-            on_open_newest,
-            [obj_job, placing],
-            [tabs, picker, *scene_outputs],
-        ).then(  # fmt: skip
-            *log
-        ).then(*lib)
         picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log).then(*lib)
         history_table.select(
             on_pick_row, [picker, history_table, obj_job, placing], scene_outputs
-        ).then(*log)
+        ).then(*log).then(*lib)
 
-        # Objects list: show/hide (view only)
-        objects_shown.input(
-            on_objects_shown,
-            [camera_json, picker, version, objects_shown, obj_job, placing, floor, show_obj,
+        # Objects table: hide/show, add a generated one, move a placed one
+        objects_table.select(
+            on_object_select,
+            [camera_json, picker, show_obj, version, hidden, obj_job, placing, moving, floor,
+             obj_keys],
+            [obj_status, hidden, viewer, obj_job, placing, moving, place_group, obj_ref, floor,
              *sliders],
-            [hidden, viewer],
-            js=GET_CAMERA_JS,
-        )  # fmt: skip
+            js=OBJECT_SELECT_JS,
+            trigger_mode="once",
+        ).then(*lib)  # fmt: skip
+        # Edits table: open one edit's version
+        edits_table.select(
+            on_edit_select,
+            [camera_json, picker, show_obj, version, hidden, edit_numbers, obj_job, placing,
+             moving, floor],
+            scene_outputs,
+            js=OBJECT_SELECT_JS,
+            trigger_mode="once",
+        ).then(*log).then(*lib)  # fmt: skip
 
         # Add object
         clicked(
             obj_go,
             "⏳ Starting…",
             on_generate,
-            [picker, version, obj_prompt, obj_seed, obj_image],
+            [picker, version, obj_prompt, obj_seed, obj_image, placing],
             [obj_status, obj_job, placing, place_group],
-        )
+        ).then(*lib)
         gr.Timer(5).tick(
             on_object_tick,
             [obj_job, placing, picker, version, hidden, show_obj],
@@ -1155,31 +1306,26 @@ def build() -> gr.Blocks:
             slider.input(None, sliders, None, js=PLACEMENT_JS)
         bridge.change(on_bridge, bridge, sliders)
         show_obj.input(None, show_obj, None, js=SHOW_OBJECT_JS)
-        clicked(
-            obj_again,
-            "⏳ Loading…",
-            on_add_again,
-            [obj_library, placing, picker, version, hidden, show_obj],
-            [obj_status, obj_job, placing, viewer, place_group, obj_ref, floor, *sliders],
-        )
         # A finished object enters placement: list it among the generated objects.
         placing.change(*lib)
+        # A generating object's progress also shows in the table.
+        obj_status.change(*lib)
         clicked(
             place_ok,
             "⏳ Placing…",
             on_place,
-            [picker, version, obj_job, *sliders],
+            [*sliders, picker, version, obj_job, moving],
             [obj_status, *scene_outputs],
             js=PLACE_JS,
-        ).then(*log)
+        ).then(*log).then(*lib)
         clicked(
             place_cancel,
             "⏳ Cancelling…",
             on_cancel,
             [camera_json, picker, version, hidden],
-            [obj_status, viewer, place_group, placing, obj_job],
+            [obj_status, viewer, place_group, placing, obj_job, moving],
             js=GET_CAMERA_JS,
-        )
+        ).then(*lib)
 
         # Edit scene
         ed_region.input(None, ed_region, ed_region, js=REGION_JS)
@@ -1189,7 +1335,7 @@ def build() -> gr.Blocks:
             ed_go,
             "⏳ Starting…",
             on_edit,
-            [camera_json, picker, version, ed_prompt, ed_region, ed_seed, placing],
+            [camera_json, picker, ed_prompt, ed_region, ed_seed, version, placing],
             [ed_status, edit_job],
             js=GET_CAMERA_JS,
         )
@@ -1198,14 +1344,14 @@ def build() -> gr.Blocks:
             [edit_job, picker, obj_job, placing],
             [ed_status, edit_job, *scene_outputs],
         )
-        ed_status.change(*log)
+        ed_status.change(*log).then(*lib)
 
         # Preview
         clicked(
             pv_go,
             "⏳ Starting…",
             on_preview,
-            [camera_json, picker, version, pv_prompt, pv_strength, pv_seed, placing],
+            [camera_json, picker, pv_prompt, pv_strength, pv_seed, version, placing],
             [pv_status, preview_job],
             js=GET_CAMERA_JS,
         )

@@ -10,7 +10,8 @@ reconstruction worker does not write one for v1, so v1 falls back to the job's
 finish time and mode "reconstruction".
 
 Versions made with Add object also list the objects added up to them
-(`objects: [{id, prompt, object_job, start, count}]`, inherited from the parent).
+(`objects: [{id, prompt, object_job, start, count, placement}]`, inherited from the parent;
+entries written before `placement` was kept get it from the version that added them).
 `start` and `count` are Gaussian indexes in `scene.splat` (32 bytes each), so an object
 can be hidden in the viewer by dropping its byte range (`filtered_splat`). Versions
 made before this existed have no list, so their objects cannot be hidden.
@@ -33,6 +34,7 @@ MODE_LABEL = {
     "reconstruction": "reconstruction",
     "add_object": "add object",
     "edit_scene": "edit scene",
+    "move_object": "move object",
 }
 HISTORY_COLUMNS = ["Version", "Date", "Mode", "Prompt", "Model", "From"]
 _VERSION_DIR = re.compile(r"^v([1-9]\d*)$")
@@ -43,7 +45,7 @@ class Version:
     scene_id: str
     number: int
     created_at: float | None = None
-    mode: str = "reconstruction"  # reconstruction | add_object | edit_scene
+    mode: str = "reconstruction"  # reconstruction | add_object | edit_scene | move_object
     prompt: str | None = None
     model: str | None = None
     parent: int | None = None
@@ -78,8 +80,14 @@ def list_versions(store: Store, scene_id: str, v1_created_at: float | None = Non
         reverse=True,
     )
     out = []
+    placements: dict[tuple, dict] = {}  # (id, object job) -> placement, for old entries
+    metas = {n: store.read_json(f"scenes/{scene_id}/v{n}/version.json") or {} for n in numbers}
+    for meta in metas.values():
+        objs = _objects(meta.get("objects"))
+        if meta.get("mode") == "add_object" and objs and isinstance(meta.get("placement"), dict):
+            placements.setdefault((objs[-1]["id"], objs[-1].get("object_job")), meta["placement"])
     for n in numbers:
-        meta = store.read_json(f"scenes/{scene_id}/v{n}/version.json") or {}
+        meta = metas[n]
         if n == 1 and meta.get("created_at") is None:
             meta["created_at"] = v1_created_at
         out.append(
@@ -91,7 +99,12 @@ def list_versions(store: Store, scene_id: str, v1_created_at: float | None = Non
                 prompt=meta.get("prompt"),
                 model=meta.get("model"),
                 parent=meta.get("parent"),
-                objects=tuple(_objects(meta.get("objects"))),
+                objects=tuple(
+                    o
+                    if o.get("placement")
+                    else {**o, "placement": placements.get((o["id"], o.get("object_job")))}
+                    for o in _objects(meta.get("objects"))
+                ),
             )
         )
     return out
@@ -248,5 +261,47 @@ def filtered_splat(store: Store, version: Version, hidden: list[str] | set[str])
                     break
                 out.write(chunk)
                 remaining -= len(chunk)
+    tmp.replace(target)
+    return target
+
+
+def view_splat(
+    store: Store, version: Version, versions: list[Version], hidden: list[str] | set[str]
+) -> Path | None:
+    """Local `.splat` to view `version` with hidden objects ("o2") and edits ("e5").
+
+    An edit cannot be cut out, so hiding edit vN shows vN's parent instead, plus the
+    objects placed after the last edit (`version.objects`; edits keep no object list,
+    so objects placed between two edits are part of the later edit). With several
+    hidden edits the earliest one counts. View only; downloads keep the full files.
+    """
+    hidden = set(hidden or ())
+    edits = {int(h[1:]) for h in hidden if h[:1] == "e" and h[1:].isdigit()}
+    by_number = {v.number: v for v in versions}
+    line, current = [], version
+    while current is not None and current not in line:
+        line.append(current)
+        current = by_number.get(current.parent) if current.parent else None
+    cut = [v for v in line if v.number in edits and v.mode == "edit_scene" and v.parent]
+    parent = by_number.get(cut[-1].parent) if cut else None  # line is newest first
+    if parent is None:
+        return filtered_splat(store, version, hidden)
+    base = store.download(f"{parent.path}/{FILES['splat']}")
+    full = store.download(f"{version.path}/{FILES['splat']}")
+    if base is None or full is None:
+        return None
+    keep = [o for o in version.objects if o["id"] not in hidden]
+    ids = "-".join([f"e{cut[-1].number}", *sorted(o["id"] for o in keep)])
+    target = Path(store.file_dir) / "hidden" / f"{version.scene_id}-v{version.number}-x{ids}.splat"
+    if target.is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".part")
+    with tmp.open("wb") as out:
+        out.write(base.read_bytes())
+        with full.open("rb") as f:
+            for o in keep:
+                f.seek(o["start"] * SPLAT_RECORD_BYTES)
+                out.write(f.read(o["count"] * SPLAT_RECORD_BYTES))
     tmp.replace(target)
     return target
