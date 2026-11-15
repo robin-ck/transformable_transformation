@@ -717,7 +717,22 @@ def on_create(files: list[str] | None):
     return f"**Job {job.job_id} started.** It appears in the list below.", jobs_table()
 
 
+def clicked(button: gr.Button, busy: str, fn, inputs, outputs, **kwargs):
+    """Wire ``button`` so it reacts at once: it shows ``busy`` and is disabled while the
+    action runs, then gets its label back (also after an error). Returns the action's
+    event, so callers can chain ``.then`` on it."""
+    label = button.value
+    quick = {"queue": False, "show_progress": "hidden"}
+    action = button.click(lambda: gr.update(value=busy, interactive=False), None, button, **quick)
+    action = action.then(fn, inputs, outputs, **kwargs)
+    action.then(lambda: gr.update(value=label, interactive=True), None, button, **quick)
+    return action
+
+
 CSS = """
+button { transition: transform 60ms ease, filter 60ms ease; }
+button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); }
+button:disabled { cursor: progress !important; }
 #placement-bridge, #camera-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
 #history-table tbody tr { cursor: pointer; }
@@ -878,15 +893,21 @@ def build() -> gr.Blocks:
 
         # New scene
         files.change(on_upload, files, [message, create])
-        create.click(on_create, files, [message, table])
-        refresh.click(refresh_all, picker, [table, picker])
+        clicked(create, "⏳ Starting…", on_create, files, [message, table])
+        clicked(refresh, "⏳ Refreshing…", refresh_all, picker, [table, picker])
 
         # Start tab, finished-job notice, opening scenes and versions
         demo.load(on_load, [obj_job, placing], [tabs, table, picker, seen, *scene_outputs]).then(
             *log
         ).then(*lib)
         gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
-        open_newest.click(on_open_newest, [obj_job, placing], [tabs, picker, *scene_outputs]).then(
+        clicked(
+            open_newest,
+            "⏳ Opening…",
+            on_open_newest,
+            [obj_job, placing],
+            [tabs, picker, *scene_outputs],
+        ).then(  # fmt: skip
             *log
         ).then(*lib)
         picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log).then(*lib)
@@ -904,7 +925,9 @@ def build() -> gr.Blocks:
         )  # fmt: skip
 
         # Add object
-        obj_go.click(
+        clicked(
+            obj_go,
+            "⏳ Starting…",
             on_generate,
             [picker, version, obj_prompt, obj_seed],
             [obj_status, obj_job, placing, place_group],
@@ -918,20 +941,26 @@ def build() -> gr.Blocks:
             slider.input(None, sliders, None, js=PLACEMENT_JS)
         bridge.change(on_bridge, bridge, sliders)
         show_obj.input(None, show_obj, None, js=SHOW_OBJECT_JS)
-        obj_again.click(
+        clicked(
+            obj_again,
+            "⏳ Loading…",
             on_add_again,
             [obj_library, placing, picker, version, hidden, show_obj],
             [obj_status, obj_job, placing, viewer, place_group, obj_ref, floor, *sliders],
         )
         # A finished object enters placement: list it among the generated objects.
         placing.change(*lib)
-        place_ok.click(
+        clicked(
+            place_ok,
+            "⏳ Placing…",
             on_place,
             [picker, version, obj_job, *sliders],
             [obj_status, *scene_outputs],
             js=PLACE_JS,
         ).then(*log)
-        place_cancel.click(
+        clicked(
+            place_cancel,
+            "⏳ Cancelling…",
             on_cancel,
             [camera_json, picker, version, hidden],
             [obj_status, viewer, place_group, placing, obj_job],
@@ -942,7 +971,9 @@ def build() -> gr.Blocks:
         ed_region.input(None, ed_region, ed_region, js=REGION_JS)
         # A new viewer page starts without the box overlay, so switch the region off.
         viewer.change(lambda: False, None, ed_region)
-        ed_go.click(
+        clicked(
+            ed_go,
+            "⏳ Starting…",
             on_edit,
             [camera_json, picker, version, ed_prompt, ed_region, ed_seed, placing],
             [ed_status, edit_job],
@@ -956,7 +987,9 @@ def build() -> gr.Blocks:
         ed_status.change(*log)
 
         # Preview
-        pv_go.click(
+        clicked(
+            pv_go,
+            "⏳ Starting…",
             on_preview,
             [camera_json, picker, version, pv_prompt, pv_strength, pv_seed, placing],
             [pv_status, preview_job],
@@ -971,8 +1004,14 @@ def build() -> gr.Blocks:
         pv_status.change(*log)
 
         # Downloads (always the full files, whatever is hidden)
-        get_ply.click(lambda j, n: on_download(j, n, "ply"), [picker, version], download)
-        get_splat.click(lambda j, n: on_download(j, n, "splat"), [picker, version], download)
+        clicked(
+            get_ply, "⏳ Fetching…", lambda j, n: on_download(j, n, "ply"), [picker, version],
+            download,
+        )  # fmt: skip
+        clicked(
+            get_splat, "⏳ Fetching…", lambda j, n: on_download(j, n, "splat"),
+            [picker, version], download,
+        )  # fmt: skip
     return demo
 
 
