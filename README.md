@@ -96,6 +96,18 @@ hf upload <you>/splat-studio src/splat_studio splat_studio --repo-type space
 
 Then add the four secrets (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `HF_TOKEN`, `SPLAT_STUDIO_DATASET`) in the Space settings, and make sure `modal deploy modal_app/app.py` has been run.
 
+### Using the Space
+
+The page has two tabs. It opens on **Scene** when a finished scene exists (at its newest version), otherwise on **New scene**.
+
+- **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; "Open newest scene" in the Scene tab opens it.
+- **Scene:** pick a scene; the viewer is on the left, the tools on the right. Switching tools keeps the scene, version, camera and any object being placed.
+  - **History:** every version with date, mode, prompt, model and the version it was made from. Click a row to open that version. "Prompt log" also lists the 2D previews.
+  - **Add object:** describe an object and generate it (a few minutes). Then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders (they follow the viewer). "Show object" hides it while you look around. "Place in new version" saves a new version; "Cancel" saves nothing.
+  - **Edit scene:** aim the camera, write an instruction (e.g. "make the table green") and start the edit; about 10 minutes later the result is a new version, saved even if you close the page. The edit is strongest around the current view. Tick "Limit to a region" and drag a box in the viewer to change only that part (recommended for single objects).
+  - **Preview:** aim the camera, describe a look, and get a restyled 2D image of that view. The scene is not changed.
+- **Objects shown** (under the viewer, for versions made with Add object): untick an object to hide it in the viewer. This changes only the view; downloads always contain every object. Versions made before object tracking have no such controls.
+
 ## Licence
 
 Apache-2.0, see `LICENSE`. Third-party models used by the project keep their own licences.
