@@ -9,8 +9,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from splat_studio.editing.objects import Placement, default_placement, merge_files
-from splat_studio.reconstruction.export import ply_vertex_count
+from splat_studio.reconstruction.export import ply_vertex_count, read_ply, write_ply
 
 from .jobs import Job, Store
 from .versions import Version, add_version
@@ -83,6 +85,7 @@ def place_object(
             "object_job": job.job_id,
             "start": start,
             "count": total - start,
+            "placement": placement.to_dict(),
         }
         return add_version(
             store,
@@ -99,6 +102,75 @@ def place_object(
                 "placement": placement.to_dict(),
             },
             objects=[*earlier, new_object],
+        )
+
+
+def object_placement(obj: dict) -> Placement | None:
+    """Stored placement of a placed object, or None for entries made before it was kept."""
+    raw = obj.get("placement")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return Placement(**{k: float(v) for k, v in raw.items() if k in Placement.__annotations__})
+    except (TypeError, ValueError):
+        return None
+
+
+def move_object(
+    store: Store, version: Version, object_id: str, placement: Placement,
+    now: float | None = None,
+) -> Version:  # fmt: skip
+    """Move (or resize) an object already in `version`; returns the new version.
+
+    The object's Gaussians are cut out of the scene and its generated file is merged
+    again at `placement`, after the other objects. Other objects keep their place.
+    """
+    earlier = list(version.objects)
+    obj = next((o for o in earlier if o["id"] == object_id), None)
+    if obj is None:
+        raise PlaceError("That object is not in this version.")
+    job_id = obj.get("object_job")
+    object_ply = store.download(f"objects/{job_id}/object.ply") if job_id else None
+    if object_ply is None:
+        raise PlaceError("The generated object file is missing, so it cannot be moved.")
+    scene_ply = store.download(f"{version.path}/scene.ply")
+    if scene_ply is None:
+        raise PlaceError(f"Version v{version.number} has no .ply file.")
+    scene = read_ply(scene_ply)
+    start, count = obj["start"], obj["count"]
+    if start + count > len(scene):
+        raise PlaceError("The scene and its object list do not match.")
+    rest = []
+    for o in earlier:
+        if o["id"] == object_id:
+            continue
+        shift = count if o["start"] > start else 0
+        rest.append({**o, "start": o["start"] - shift})
+    kept = np.concatenate([scene[:start], scene[start + count :]])
+    with tempfile.TemporaryDirectory() as tmp:
+        cut = Path(tmp) / "cut.ply"
+        write_ply(cut, kept)
+        out_ply, out_splat = Path(tmp) / "scene.ply", Path(tmp) / "scene.splat"
+        try:
+            total = merge_files(
+                cut, object_ply, placement, out_ply, out_splat,
+                object_counts=[o["count"] for o in rest],
+            )  # fmt: skip
+        except ValueError as e:
+            raise PlaceError(f"The scene and its object list do not match ({e}).") from e
+        moved = {**obj, "start": len(kept), "count": total - len(kept)}
+        moved["placement"] = placement.to_dict()
+        label = obj.get("prompt") or "object"
+        return add_version(
+            store,
+            version.scene_id,
+            {"ply": out_ply, "splat": out_splat},
+            mode="move_object",
+            prompt=f"move {label}",
+            parent=version.number,
+            now=now,
+            extra={"object_id": object_id, "placement": placement.to_dict()},
+            objects=[*rest, moved],
         )
 
 
@@ -133,3 +205,76 @@ def library_choices(jobs: list[Job], scene_id: str | None) -> list[tuple[str, st
     ]  # fmt: skip
     done.sort(key=lambda j: j.created_at, reverse=True)
     return [(f"{j.summary} (seed {j.params.get('seed', 0)}, {j.job_id})", j.job_id) for j in done]
+
+
+# --- objects and edits tables (Scene tab) ------------------------------------------
+
+OBJECT_COLUMNS = ["Object", "Status", "Action"]
+EDIT_COLUMNS = ["Version", "Instruction", "Status", "Action"]
+JOB_STATE = {"queued": "⏳ waiting for a GPU", "running": "⚙️ generating", "failed": "❌ failed"}
+
+
+def object_rows(
+    version: Version | None,
+    hidden: list[str] | None,
+    jobs: list[Job],
+    scene_id: str | None,
+    moving: str | None = None,
+) -> tuple[list[list[str]], list[list[str]]]:
+    """Rows of the objects table and, per row, a key [kind, id].
+
+    Kinds: "placed" (an object in `version`: Hide/Show, click to move), "library" (a
+    finished object generated for the scene: Add places a copy) and "job" (still
+    generating or failed: no action).
+    """
+    rows, keys = [], []
+    hidden_ids = set(hidden or [])
+    for i, o in enumerate(version.objects if version else (), start=1):
+        name = f"{i}. {o.get('prompt') or 'object'}"
+        if o["id"] == moving:
+            status, action = "✋ moving", ""
+        elif o["id"] in hidden_ids:
+            status, action = "hidden", "👁 Show"
+        else:
+            status, action = "in scene", "🚫 Hide"
+        rows.append([name, status, action])
+        keys.append(["placed", o["id"]])
+    mine = [
+        j for j in jobs
+        if j.kind == "object" and scene_id and j.params.get("scene_id") == scene_id
+    ]  # fmt: skip
+    mine.sort(key=lambda j: j.created_at, reverse=True)
+    for j in mine:
+        label = f"{j.summary} (seed {j.params.get('seed', 0)})"
+        if j.status == "done" and j.scene_path:
+            rows.append([label, "generated", "➕ Add"])
+            keys.append(["library", j.job_id])
+        else:
+            rows.append([label, JOB_STATE.get(j.status, j.status), ""])
+            keys.append(["job", j.job_id])
+    return rows, keys
+
+
+def edit_rows(
+    versions: list[Version], edit_jobs: list[Job], shown: int | None
+) -> tuple[list[list[str]], list[int | None]]:
+    """Rows of the edits table (newest first) and, per row, the version it opens.
+
+    Every scene edit is listed; only one can be shown at a time (the open version).
+    Edits still running or failed are listed without an action.
+    """
+    rows: list[list[str]] = []
+    numbers: list[int | None] = []
+    for j in sorted(edit_jobs, key=lambda j: j.created_at, reverse=True):
+        if j.status == "done":
+            continue
+        state = {"queued": "⏳ waiting", "running": "⚙️ running"}.get(j.status, "❌ failed")
+        rows.append(["", j.params.get("prompt") or j.summary, state, ""])
+        numbers.append(None)
+    for v in versions:
+        if v.mode != "edit_scene":
+            continue
+        on = v.number == shown
+        rows.append([f"v{v.number}", v.prompt or "", "● shown" if on else "", "" if on else "Show"])
+        numbers.append(v.number)
+    return rows, numbers

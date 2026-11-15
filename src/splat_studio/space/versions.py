@@ -10,7 +10,8 @@ reconstruction worker does not write one for v1, so v1 falls back to the job's
 finish time and mode "reconstruction".
 
 Versions made with Add object also list the objects added up to them
-(`objects: [{id, prompt, object_job, start, count}]`, inherited from the parent).
+(`objects: [{id, prompt, object_job, start, count, placement}]`, inherited from the parent;
+entries written before `placement` was kept get it from the version that added them).
 `start` and `count` are Gaussian indexes in `scene.splat` (32 bytes each), so an object
 can be hidden in the viewer by dropping its byte range (`filtered_splat`). Versions
 made before this existed have no list, so their objects cannot be hidden.
@@ -33,6 +34,7 @@ MODE_LABEL = {
     "reconstruction": "reconstruction",
     "add_object": "add object",
     "edit_scene": "edit scene",
+    "move_object": "move object",
 }
 HISTORY_COLUMNS = ["Version", "Date", "Mode", "Prompt", "Model", "From"]
 _VERSION_DIR = re.compile(r"^v([1-9]\d*)$")
@@ -43,7 +45,7 @@ class Version:
     scene_id: str
     number: int
     created_at: float | None = None
-    mode: str = "reconstruction"  # reconstruction | add_object | edit_scene
+    mode: str = "reconstruction"  # reconstruction | add_object | edit_scene | move_object
     prompt: str | None = None
     model: str | None = None
     parent: int | None = None
@@ -78,8 +80,14 @@ def list_versions(store: Store, scene_id: str, v1_created_at: float | None = Non
         reverse=True,
     )
     out = []
+    placements: dict[tuple, dict] = {}  # (id, object job) -> placement, for old entries
+    metas = {n: store.read_json(f"scenes/{scene_id}/v{n}/version.json") or {} for n in numbers}
+    for meta in metas.values():
+        objs = _objects(meta.get("objects"))
+        if meta.get("mode") == "add_object" and objs and isinstance(meta.get("placement"), dict):
+            placements.setdefault((objs[-1]["id"], objs[-1].get("object_job")), meta["placement"])
     for n in numbers:
-        meta = store.read_json(f"scenes/{scene_id}/v{n}/version.json") or {}
+        meta = metas[n]
         if n == 1 and meta.get("created_at") is None:
             meta["created_at"] = v1_created_at
         out.append(
@@ -91,7 +99,12 @@ def list_versions(store: Store, scene_id: str, v1_created_at: float | None = Non
                 prompt=meta.get("prompt"),
                 model=meta.get("model"),
                 parent=meta.get("parent"),
-                objects=tuple(_objects(meta.get("objects"))),
+                objects=tuple(
+                    o
+                    if o.get("placement")
+                    else {**o, "placement": placements.get((o["id"], o.get("object_job")))}
+                    for o in _objects(meta.get("objects"))
+                ),
             )
         )
     return out

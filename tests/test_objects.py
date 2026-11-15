@@ -306,3 +306,80 @@ def test_start_placement_reports_floor(tmp_path: Path) -> None:
     store, v1, _job, _n = _store_with_scene(tmp_path)
     _placement, ranges = start_placement(store, v1)
     assert ranges.floor == pytest.approx(0.0, abs=0.3)
+
+
+# --- move a placed object (objects table) -----------------------------------------
+
+
+def test_move_object_keeps_the_others_in_place(tmp_path: Path) -> None:
+    from splat_studio.space import versions
+    from splat_studio.space.add_object import move_object, object_placement, place_object
+
+    store, v1, job, n_scene = _store_with_scene(tmp_path)
+    n_obj = 11**3
+    v2 = place_object(store, v1, job, Placement(x=1, y=1, z=1, size=0.5))
+    v3 = place_object(store, v2, job, Placement(x=3, y=3, z=1, size=0.5))
+    assert object_placement(v3.objects[0]) == Placement(x=1, y=1, z=1, size=0.5)
+    v4 = move_object(store, v3, "o1", Placement(x=2, y=0, z=1, size=0.25), now=300.0)
+    assert v4.mode == "move_object" and v4.parent == 3 and v4.prompt == "move a mature oak tree"
+    o2, o1 = versions.list_versions(store, "s1")[0].objects  # the moved one goes last
+    assert (o2["id"], o2["start"], o2["count"]) == ("o2", n_scene, n_obj)
+    assert (o1["id"], o1["start"], o1["count"]) == ("o1", n_scene + n_obj, n_obj)
+    assert object_placement(o1) == Placement(x=2, y=0, z=1, size=0.25)
+    pos = np.frombuffer(store.download(f"{v4.path}/scene.splat").read_bytes(), "<f4")
+    pos = pos.reshape(-1, 8)[:, :3]
+    assert len(pos) == n_scene + 2 * n_obj
+    assert np.allclose(pos[n_scene : n_scene + n_obj, :2].mean(axis=0), [3, 3], atol=0.01)
+    assert np.allclose(pos[n_scene + n_obj :, :2].mean(axis=0), [2, 0], atol=0.01)
+    # v3 is untouched
+    assert len(export.read_ply(store.download(f"{v3.path}/scene.ply"))) == n_scene + 2 * n_obj
+
+
+def test_old_object_entries_get_placement_from_their_version(tmp_path: Path) -> None:
+    from splat_studio.space import versions
+    from splat_studio.space.add_object import object_placement, place_object
+
+    store, v1, job, _n = _store_with_scene(tmp_path)
+    v2 = place_object(store, v1, job, Placement(x=1, y=1, z=1, size=0.5))
+    v3 = place_object(store, v2, job, Placement(x=3, y=3, z=1, size=0.5))
+    for v in (v2, v3):  # as written before entries kept their placement
+        meta = store.read_json(f"{v.path}/version.json")
+        meta["objects"] = [
+            {k: x for k, x in o.items() if k != "placement"} for o in meta["objects"]
+        ]
+        store.write_json(f"{v.path}/version.json", meta)
+    o1, o2 = versions.list_versions(store, "s1")[0].objects
+    assert object_placement(o1) == Placement(x=1, y=1, z=1, size=0.5)
+    assert object_placement(o2) == Placement(x=3, y=3, z=1, size=0.5)
+    assert object_placement({"id": "o9"}) is None
+
+
+def test_object_and_edit_rows() -> None:
+    from splat_studio.space import jobs, versions
+    from splat_studio.space.add_object import edit_rows, object_rows
+
+    v = versions.Version("s1", 3, objects=({"id": "o1", "prompt": "oak"}, {"id": "o2"}))
+    js = [
+        jobs.Job("a", "object", "oak", 1.0, status="done", scene_path="objects/a",
+                 params={"scene_id": "s1", "seed": 2}),
+        jobs.Job("b", "object", "pond", 2.0, status="running", params={"scene_id": "s1"}),
+        jobs.Job("c", "object", "other", 3.0, status="done", params={"scene_id": "s2"}),
+    ]  # fmt: skip
+    rows, keys = object_rows(v, ["o2"], js, "s1", moving="o1")
+    assert rows == [
+        ["1. oak", "✋ moving", ""],
+        ["2. object", "hidden", "👁 Show"],
+        ["pond (seed 0)", "⚙️ generating", ""],
+        ["oak (seed 2)", "generated", "➕ Add"],
+    ]
+    assert keys == [["placed", "o1"], ["placed", "o2"], ["job", "b"], ["library", "a"]]
+    vs = [
+        versions.Version("s1", 3, mode="edit_scene", prompt="greener"),
+        versions.Version("s1", 2, mode="add_object", prompt="oak"),
+        versions.Version("s1", 1),
+    ]
+    edits = [jobs.Job("e", "edit", "rain", 5.0, status="failed", params={"prompt": "rain"})]
+    rows, numbers = edit_rows(vs, edits, shown=2)
+    assert rows == [["", "rain", "❌ failed", ""], ["v3", "greener", "", "Show"]]
+    assert numbers == [None, 3]
+    assert edit_rows(vs, [], shown=3)[0] == [["v3", "greener", "● shown", ""]]
