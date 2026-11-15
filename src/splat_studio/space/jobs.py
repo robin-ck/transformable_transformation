@@ -13,7 +13,8 @@ and `preview.png`; they never write to `scenes/`. Edit jobs (task 4.4) live unde
 `edits/<job_id>/` with before/after renders; the worker itself saves the edited scene
 as the next version under `scenes/`, and its run log names it (`version`).
 Image jobs (Image editing tab) live under `images/<job_id>/` with `result.png`; an
-uploaded input image goes to `images/<job_id>/input/source.<ext>`.
+uploaded input image goes to `images/<job_id>/input/source.<ext>`. A base image saved
+without a GPU step is stored as-is as `images/<job_id>/result.<ext>`.
 """
 
 from __future__ import annotations
@@ -172,6 +173,11 @@ class Job:
         return cls(**{k: v for k, v in data.items() if k in names})
 
 
+def image_result_path(job: Job) -> str:
+    """Dataset path of an image job's result (generated: result.png; saved: as uploaded)."""
+    return f"{job.scene_path}/{job.params.get('result_file', 'result.png')}"
+
+
 def new_job_id(now: float) -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime(now)) + "-" + uuid.uuid4().hex[:6]
 
@@ -327,6 +333,18 @@ class JobManager:
                 aspect=aspect,
             ),  # fmt: skip
         )
+
+    def save_image(self, image: Path) -> Job:
+        """Store an uploaded image unchanged as a finished image job (no GPU), so it
+        can be picked later as the base for edits."""
+        now = self.clock()
+        job = Job(new_job_id(now), "image", f"uploaded {image.name}"[:80], now)
+        result_file = f"result{image.suffix.lower()}"
+        job.scene_path = f"{self.prefix}/{job.job_id}"
+        self.store.upload_files({f"{job.scene_path}/{result_file}": image}, f"Base {job.job_id}")
+        job.params = {"mode": "upload", "result_file": result_file}
+        job.status, job.finished_at = "done", now
+        return self._save(job)
 
     def get(self, job_id: str) -> Job | None:
         data = self.store.read_json(f"{self.prefix}/{job_id}/job.json")

@@ -41,6 +41,7 @@ from splat_studio.space.jobs import (  # noqa: E402
     JobManager,
     LocalStore,
     format_elapsed,
+    image_result_path,
 )
 from splat_studio.space.validation import (  # noqa: E402
     HELP,
@@ -720,11 +721,12 @@ def on_preview_tick(preview_job: str | None):
 
 
 def on_image_mode(mode: str):
-    """Show the controls of the chosen mode. Outputs: source, aspect, strength."""
+    """Show the controls of the chosen mode. Outputs: source, aspect, strength, save-base."""
     with_image = mode == images.IMAGE_TO_IMAGE
     return (
         gr.update(visible=with_image),
         gr.update(visible=not with_image),
+        gr.update(visible=with_image),
         gr.update(visible=with_image),
     )
 
@@ -768,7 +770,7 @@ def on_image_tick(image_job: str | None):
         elapsed = format_elapsed(job.elapsed(IMAGES.clock()))
         return [f"{label}: **{job.summary}** ({elapsed})", gr.skip(), *rest]
     try:
-        result = STORE.download(f"{job.scene_path}/result.png")
+        result = STORE.download(image_result_path(job))
     except Exception as e:
         return [f"**The image could not be fetched** ({type(e).__name__}).", None, *rest]
     if result is None:
@@ -790,22 +792,51 @@ def on_use_result(result: str | None):
     return images.IMAGE_TO_IMAGE, result, *on_image_mode(images.IMAGE_TO_IMAGE)[1:]
 
 
+def on_save_base(source: str | None):
+    """Store the input image unchanged. Outputs: status, image_job, result, use-as-input."""
+    try:
+        image = validate_source_image(source)
+    except UploadError as e:
+        raise gr.Error(str(e)) from e
+    job = IMAGES.save_image(image)
+    return (
+        f"✅ Saved unchanged as a base (job {job.job_id}). Find it under "
+        '"Earlier images", or write a prompt and generate from it.',
+        None,
+        str(image),
+        gr.update(interactive=True),
+    )
+
+
+IMAGE_MODE_LABEL = {"image": "edited", "text": "from text", "upload": "base, unchanged"}
+
+
 def on_image_history():
-    """Finished images, newest first, as gallery items (image, caption)."""
+    """Finished images, newest first. Outputs: gallery items (image, caption), paths."""
     items = []
     for job in IMAGES.list(refresh=False):
         if job.status != "done" or not job.scene_path or len(items) >= 24:
             continue
         try:
-            path = STORE.download(f"{job.scene_path}/result.png")
+            path = STORE.download(image_result_path(job))
         except Exception:
             continue
         if path:
-            mode = "image" if job.params.get("mode") == "image" else "text"
-            items.append((str(path), f"{job.summary} ({mode}, seed {job.params.get('seed', 0)})"))
+            mode = job.params.get("mode", "text")
+            label = IMAGE_MODE_LABEL.get(mode, mode)
+            seed = "" if mode == "upload" else f", seed {job.params.get('seed', 0)}"
+            items.append((str(path), f"{job.summary} ({label}{seed})"))
     if not items:
         gr.Info("No finished images yet.")
-    return items
+    return items, [p for p, _ in items]
+
+
+def on_pick_earlier(paths: list[str] | None, evt: gr.SelectData):
+    """Use a clicked earlier image as the input. Outputs: mode, source, aspect, strength."""
+    if not paths or evt.index is None or evt.index >= len(paths):
+        raise gr.Error("Show the earlier images again, then pick one.")
+    gr.Info("Picked as input image. Write a prompt and generate.")
+    return on_use_result(paths[evt.index])
 
 
 def on_download(job_id: str | None, number: int | None, kind: str):
@@ -865,6 +896,7 @@ def build() -> gr.Blocks:
         version, hidden, seen = gr.State(None), gr.State([]), gr.State(None)
         obj_job, placing, floor = gr.State(None), gr.State(False), gr.State(None)
         preview_job, edit_job, image_job = gr.State(None), gr.State(None), gr.State(None)
+        image_paths = gr.State([])
 
         with gr.Tabs(selected="new") as tabs:
             # --- New scene: upload, create, jobs -----------------------------------
@@ -1039,6 +1071,7 @@ def build() -> gr.Blocks:
                         with gr.Row():
                             im_seed = gr.Number(label="Seed", value=0, precision=0)
                             im_go = gr.Button("Generate image", variant="primary")
+                        im_keep = gr.Button("Save as base (no change)", visible=False)
                         im_status = gr.Markdown()
                     with gr.Column(scale=3):
                         im_result = gr.Image(
@@ -1048,7 +1081,10 @@ def build() -> gr.Blocks:
                         im_again = gr.Button("Use result as input", interactive=False)
                 with gr.Accordion("Earlier images", open=False):
                     im_history_go = gr.Button("Show earlier images")
-                    im_history = gr.Gallery(label="Finished images", columns=4, height="auto")
+                    im_history = gr.Gallery(
+                        label="Finished images (click one to use it as the input)",
+                        columns=6, height=320, object_fit="cover", allow_preview=False,
+                    )  # fmt: skip
         sliders = [px, py, pz, pturn, psize, ptilt_x, ptilt_y]  # order of Placement's fields
         end = [place_group, placing, obj_job]
         scene_outputs = [
@@ -1170,7 +1206,8 @@ def build() -> gr.Blocks:
         pv_status.change(*log)
 
         # Image editing
-        im_mode.change(on_image_mode, im_mode, [im_source, im_aspect, im_strength])
+        mode_outputs = [im_source, im_aspect, im_strength, im_keep]
+        im_mode.change(on_image_mode, im_mode, mode_outputs)
         clicked(
             im_go,
             "⏳ Starting…",
@@ -1179,8 +1216,13 @@ def build() -> gr.Blocks:
             [im_status, image_job],
         )
         gr.Timer(5).tick(on_image_tick, image_job, [im_status, image_job, im_result, im_again])
-        im_again.click(on_use_result, im_result, [im_mode, im_source, im_aspect, im_strength])
-        clicked(im_history_go, "⏳ Loading…", on_image_history, None, im_history)
+        im_again.click(on_use_result, im_result, [im_mode, im_source, *mode_outputs[1:]])
+        clicked(
+            im_keep, "⏳ Saving…", on_save_base, im_source,
+            [im_status, image_job, im_result, im_again],
+        )  # fmt: skip
+        clicked(im_history_go, "⏳ Loading…", on_image_history, None, [im_history, image_paths])
+        im_history.select(on_pick_earlier, image_paths, [im_mode, im_source, *mode_outputs[1:]])
 
         # Downloads (always the full files, whatever is hidden)
         clicked(

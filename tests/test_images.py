@@ -72,3 +72,16 @@ def test_image_jobs_text_and_image_modes(tmp_path: Path) -> None:
     client.results[edit.call_id] = RuntimeError("worker lost")
     assert mgr.refresh(edit).error["code"] == "image_failed"
     assert not (store.root / "scenes").exists()
+
+
+def test_save_image_stores_upload_unchanged_without_gpu(tmp_path: Path) -> None:
+    store, client = jobs.LocalStore(tmp_path / "s"), FakeClient()
+    mgr = jobs.JobManager(store, client, lambda: 1.0, prefix="images", timeout_s=600)
+    src = tmp_path / "Street.JPG"
+    src.write_bytes(b"original bytes")
+    job = mgr.save_image(src)
+    assert client.submitted == [] and job.status == "done" and job.params["mode"] == "upload"
+    assert jobs.image_result_path(job) == f"images/{job.job_id}/result.jpg"
+    assert (store.root / jobs.image_result_path(job)).read_bytes() == b"original bytes"
+    assert mgr.refresh(job) == job  # finished: never polled
+    assert [j.job_id for j in mgr.list()] == [job.job_id]
