@@ -298,8 +298,9 @@ def _placement_cfg(placement: Placement, floor: float | None, visible: bool) -> 
 
 
 def on_objects_shown(
-    camera_json, scene_id, number, shown, obj_job, placing, floor, show_obj, x, y, z, turn, size
-):
+    camera_json, scene_id, number, shown, obj_job, placing, floor, show_obj,
+    x, y, z, turn, size, tilt_x, tilt_y,
+):  # fmt: skip
     """Reload the viewer without the unticked objects; keeps the camera and placement.
 
     Outputs: hidden, viewer.
@@ -313,7 +314,7 @@ def on_objects_shown(
     job = OBJECTS.get(obj_job) if (placing and obj_job) else None
     if job is not None and job.scene_path:
         obj_path = job.scene_path
-        cfg = _placement_cfg(Placement(x, y, z, turn, size), floor, show_obj)
+        cfg = _placement_cfg(Placement(x, y, z, turn, size, tilt_x, tilt_y), floor, show_obj)
     viewer = scene_html(
         STORE, version.path, object_path=obj_path, placement=cfg,
         splat=_hidden_splat(version, hidden), camera=camera,
@@ -324,12 +325,12 @@ def on_objects_shown(
 # --- add object (task 4.2; click and drag from redesign-space-gui 3) ------------------
 
 # Sends slider values to the viewer iframe, which moves the object without reloading.
-PLACEMENT_JS = """(x, y, z, turn, size) => {
+PLACEMENT_JS = """(x, y, z, turn, size, tiltX, tiltY) => {
   const f = document.querySelector("iframe.splat-viewer");
   if (f && f.contentWindow) {
-    f.contentWindow.postMessage({type: "placement", x, y, z, turn, size}, "*");
+    f.contentWindow.postMessage({type: "placement", x, y, z, turn, size, tiltX, tiltY}, "*");
   }
-  return [x, y, z, turn, size];
+  return [x, y, z, turn, size, tiltX, tiltY];
 }"""
 
 # Shows or hides the object being placed; the placement itself is kept.
@@ -343,7 +344,7 @@ SHOW_OBJECT_JS = """(visible) => {
 
 # "Place in new version" asks the viewer for its placement first, so the merged object
 # lands where the user last saw it even if a drag never reached the sliders.
-# Inputs: scene, version, obj_job, x, y, z, turn, size.
+# Inputs: scene, version, obj_job, x, y, z, turn, size, tilt x, tilt y.
 PLACE_JS = """async (...args) => {
   const f = document.querySelector("iframe.splat-viewer");
   if (!f || !f.contentWindow) return args;
@@ -360,7 +361,8 @@ PLACE_JS = """async (...args) => {
   });
   if (!p) return args;
   const out = args.slice();
-  [out[3], out[4], out[5], out[6], out[7]] = [p.x, p.y, p.z, p.turn, p.size];
+  [out[3], out[4], out[5], out[6], out[7], out[8], out[9]] =
+    [p.x, p.y, p.z, p.turn, p.size, p.tiltX, p.tiltY];
   return out;
 }"""
 
@@ -372,24 +374,27 @@ window.addEventListener("message", (e) => {
   if (!d || d.type !== "placement_changed") return;
   const box = document.querySelector("#placement-bridge textarea, #placement-bridge input");
   if (!box) return;
-  box.value = JSON.stringify({x: d.x, y: d.y, z: d.z, turn: d.turn, size: d.size, t: Date.now()});
+  box.value = JSON.stringify({x: d.x, y: d.y, z: d.z, turn: d.turn, size: d.size,
+                              tiltX: d.tiltX, tiltY: d.tiltY, t: Date.now()});
   box.dispatchEvent(new Event("input", {bubbles: true}));
 });
 </script>"""
 
 
 def on_bridge(text: str | None):
-    """Placement from the viewer (JSON) into the five sliders; skips anything malformed."""
+    """Placement from the viewer (JSON) into the seven sliders; skips anything malformed."""
     values = parse_placement(text)
     if values is None:
-        return [gr.skip()] * 5
+        return [gr.skip()] * 7
     return [gr.update(value=v) for v in values]
 
 
-def parse_placement(text: str | None) -> tuple[float, float, float, float, float] | None:
+def parse_placement(text: str | None) -> tuple[float, ...] | None:
+    """(x, y, z, turn, size, tilt x, tilt y); missing tilts (older pages) read as 0."""
     try:
         d = json.loads(text or "")
         values = tuple(float(d[k]) for k in ("x", "y", "z", "turn", "size"))
+        values += tuple(float(d.get(k) or 0) for k in ("tiltX", "tiltY"))
     except (ValueError, TypeError, KeyError):
         return None
     if not all(math.isfinite(v) for v in values) or values[4] <= 0:
@@ -418,9 +423,9 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
     """Poll the object job; when it is done, show the object in the viewer for placement.
 
     Outputs: status, obj_job, placing, viewer, place_group, reference image, floor,
-    5 sliders.
+    7 sliders.
     """
-    rest = [gr.skip()] * 10  # placing, viewer, group, image, floor, sliders: unchanged
+    rest = [gr.skip()] * 12  # placing, viewer, group, image, floor, sliders: unchanged
     if not obj_job or placing:
         return [gr.skip(), gr.skip(), *rest]
     job = OBJECTS.get(obj_job)
@@ -452,7 +457,7 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
     )
     return [
         f"✅ **{job.summary}** is ready. Click the scene to put it there, drag it to move "
-        "(Shift-drag turns it), or use the sliders. Then place it or cancel.",
+        "(Shift-drag turns it, Alt-drag tilts it), or use the sliders. Then place it or cancel.",
         gr.skip(),
         True,
         viewer,
@@ -464,6 +469,8 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
         gr.update(minimum=ranges.z[0], maximum=ranges.z[1], value=placement.z),
         gr.update(value=0),
         gr.update(minimum=ranges.size[0], maximum=ranges.size[1], value=placement.size),
+        gr.update(value=0),
+        gr.update(value=0),
     ]
 
 
@@ -481,7 +488,10 @@ def on_add_again(choice, placing, scene_id, number, hidden, show_obj):
     return out
 
 
-def on_place(scene_id, number, obj_job, x, y, z, turn, size, progress=gr.Progress()):  # noqa: B008 - Gradio's progress idiom
+def on_place(
+    scene_id, number, obj_job, x, y, z, turn, size, tilt_x, tilt_y,
+    progress=gr.Progress(),  # noqa: B008 - Gradio's progress idiom
+):  # fmt: skip
     """Merge the object; opens the new version. Outputs: status, then `SCENE_OUTPUTS`."""
     version = _version(scene_id, number)
     job = OBJECTS.get(obj_job) if obj_job else None
@@ -489,7 +499,7 @@ def on_place(scene_id, number, obj_job, x, y, z, turn, size, progress=gr.Progres
         raise gr.Error("Nothing to place: generate an object for a picked scene first.")
     progress(0.1, desc="Merging the object into a new version…")
     try:
-        new = place_object(STORE, version, job, Placement(x, y, z, turn, size))
+        new = place_object(STORE, version, job, Placement(x, y, z, turn, size, tilt_x, tilt_y))
     except PlaceError as e:
         raise gr.Error(str(e)) from e
     view = list(scene_view(scene_id, new.number, None, False))
@@ -802,6 +812,12 @@ def build() -> gr.Blocks:
                                     py = gr.Slider(-1, 1, value=0, step=0.001, label="Move y")
                                     pz = gr.Slider(-1, 1, value=0, step=0.001, label="Height")
                                     pturn = gr.Slider(-180, 180, value=0, step=1, label="Turn (°)")
+                                    ptilt_x = gr.Slider(
+                                        -180, 180, value=0, step=1, label="Tilt about x (°)"
+                                    )
+                                    ptilt_y = gr.Slider(
+                                        -180, 180, value=0, step=1, label="Tilt about y (°)"
+                                    )
                                     psize = gr.Slider(0.01, 1, value=0.25, step=0.001, label="Size")
                                     with gr.Row():
                                         place_ok = gr.Button(
@@ -852,7 +868,7 @@ def build() -> gr.Blocks:
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
-        sliders = [px, py, pz, pturn, psize]
+        sliders = [px, py, pz, pturn, psize, ptilt_x, ptilt_y]  # order of Placement's fields
         end = [place_group, placing, obj_job]
         scene_outputs = [
             version, hidden, viewer, download, shown, objects_shown, history_table, *end

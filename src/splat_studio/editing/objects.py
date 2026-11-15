@@ -7,7 +7,8 @@ so a placement reads as "put the base here, this big, turned this far".
 The same placement is applied in two places that must agree:
   - the browser viewer, which moves the object live (position, quaternion, scale);
   - `apply_placement`, which bakes it into the Gaussians for the new version.
-Both use p' = size * Rz(turn) * p + (x, y, z).
+Both use p' = size * Rz(turn) * Ry(tilt_y) * Rx(tilt_x) * p + (x, y, z): the object is
+tilted about its own horizontal axes first, then turned about the up axis.
 """
 
 from __future__ import annotations
@@ -67,10 +68,26 @@ class Placement:
     z: float = 0.0
     turn_deg: float = 0.0  # about the up (z) axis
     size: float = 1.0  # largest side of the object, in scene units
+    tilt_x_deg: float = 0.0  # about the object's x axis (applied before the turn)
+    tilt_y_deg: float = 0.0  # about the object's y axis (applied before the turn)
 
     def quaternion_wxyz(self) -> tuple[float, float, float, float]:
-        half = math.radians(self.turn_deg) / 2
-        return (math.cos(half), 0.0, 0.0, math.sin(half))
+        """Rz(turn) * Ry(tilt_y) * Rx(tilt_x) as a (w, x, y, z) quaternion."""
+
+        def about(axis: int, deg: float) -> np.ndarray:
+            half = math.radians(deg) / 2
+            q = np.zeros(4)
+            q[0], q[axis + 1] = math.cos(half), math.sin(half)
+            return q
+
+        q = _quat_mul(
+            about(2, self.turn_deg),
+            _quat_mul(about(1, self.tilt_y_deg), about(0, self.tilt_x_deg)),
+        )
+        return tuple(float(c) for c in q)  # type: ignore[return-value]
+
+    def is_rotated(self) -> bool:
+        return any(d % 360 for d in (self.turn_deg, self.tilt_x_deg, self.tilt_y_deg))
 
     def to_viewer(self) -> dict:
         """Placement as the viewer's Three.js object expects it (quaternion is x, y, z, w)."""
@@ -79,7 +96,9 @@ class Placement:
             "position": [self.x, self.y, self.z],
             "quaternion": [qx, qy, qz, w],
             "scale": [self.size] * 3,
-            "turn": self.turn_deg,  # so the viewer's drag-to-turn starts from here
+            "turn": self.turn_deg,  # so the viewer's drag-to-turn/tilt starts from here
+            "tiltX": self.tilt_x_deg,
+            "tiltY": self.tilt_y_deg,
         }
 
     def to_dict(self) -> dict:
@@ -106,11 +125,12 @@ def apply_placement(v: np.ndarray, placement: Placement) -> np.ndarray:
     if placement.size <= 0:
         raise ValueError("size must be positive")
     q = np.array(placement.quaternion_wxyz())
+    w, qx, qy, qz = q
     rot = np.array(
         [
-            [1 - 2 * q[3] ** 2, -2 * q[0] * q[3], 0.0],
-            [2 * q[0] * q[3], 1 - 2 * q[3] ** 2, 0.0],
-            [0.0, 0.0, 1.0],
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - w * qz), 2 * (qx * qz + w * qy)],
+            [2 * (qx * qy + w * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - w * qx)],
+            [2 * (qx * qz - w * qy), 2 * (qy * qz + w * qx), 1 - 2 * (qx * qx + qy * qy)],
         ]
     )
     out = v.copy()
@@ -123,9 +143,9 @@ def apply_placement(v: np.ndarray, placement: Placement) -> np.ndarray:
     for i in range(4):
         out[f"rot_{i}"] = r[:, i]
     # Higher-order colour terms (view-dependent shine) would need rotating too; drop them
-    # when the object is turned. Generated objects normally have none.
+    # when the object is turned or tilted. Generated objects normally have none.
     rest = [n for n in v.dtype.names if n.startswith("f_rest_")]
-    if rest and placement.turn_deg % 360:
+    if rest and placement.is_rotated():
         for n in rest:
             out[n] = 0
     return out
