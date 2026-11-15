@@ -26,7 +26,7 @@ Start after task 4.3 (Preview) of `add-splat-studio-mvp` is committed.
 - [ ] 4.5 Check locally: hide and show on a version with two objects; downloads stay complete
 
 ## 5. Wrap-up
-- [ ] 5.1 ruff + pytest pass
+- [x] 5.1 ruff + pytest pass
 - [x] 5.2 README: update the usage section for the new layout (screenshots come with MVP task 5.2)
 - [x] 5.3 Note in MVP tasks that the History tab covers the UI part of task 4.5
 
@@ -34,8 +34,8 @@ Start after task 4.3 (Preview) of `add-splat-studio-mvp` is committed.
 - Built in a sandbox without Gradio or pytest (no package registry access). Checked with ruff,
   the unit tests run through a small pytest stand-in (58 tests in `test_space`, `test_objects`,
   `test_prompt_log` pass), `node --check` on all viewer and bridge scripts, and the event
-  handlers run against a `LocalStore` with Gradio stubbed out. 5.1 still needs a real
-  `pytest` run (CI or locally).
+  handlers run against a `LocalStore` with Gradio stubbed out. 5.1: later run with real
+  pytest and Gradio 5.50: 109 passed.
 - Fixed an existing test helper: `_files` in `tests/test_space.py` wrote into a folder it never
   created, so 9 upload/job tests failed with `FileNotFoundError`.
 - 1.1: preview images moved into the Preview sub-tab. The History tab keeps "History of vN"
