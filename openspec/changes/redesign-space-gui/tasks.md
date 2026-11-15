@@ -70,7 +70,7 @@ If MVP task 5.3 (object merge on Modal) is done first or in parallel, keep the s
 - [x] 6.2 Move a placed object: `add_object.move_object` cuts its Gaussians out and merges its
   generated file again at the new placement, as a new version (mode `move_object`); object
   entries keep their placement (older entries take it from the version that added them)
-- [x] 6.3 Edit scene sub-tab: table of the edits in the open version's line of parents (plus running or failed ones started from it); one shown at a time
+- [x] 6.3 Edit scene sub-tab: table of all edits (running, failed, done); one shown at a time
 - [x] 6.4 Checked in Chromium against a local scene with two objects: hide, add, cancel, move
   and save (v4 with the bench moved, the oak unchanged)
 

@@ -260,27 +260,18 @@ def edit_rows(
 ) -> tuple[list[list[str]], list[int | None]]:
     """Rows of the edits table (newest first) and, per row, the version it opens.
 
-    Only the edits the shown version builds on are listed (its line of parents), plus
-    edits started from a version in that line that are still running or failed. Only one
-    is shown at a time (the open version).
+    Every scene edit is listed; only one can be shown at a time (the open version).
+    Edits still running or failed are listed without an action.
     """
-    by_number = {v.number: v for v in versions}
-    line, seen, current = [], set(), by_number.get(shown) if shown else None
-    while current is not None and current.number not in seen:
-        seen.add(current.number)
-        line.append(current)
-        current = by_number.get(current.parent) if current.parent else None
     rows: list[list[str]] = []
     numbers: list[int | None] = []
     for j in sorted(edit_jobs, key=lambda j: j.created_at, reverse=True):
-        if j.status == "done" or j.params.get("version") not in seen:
+        if j.status == "done":
             continue
         state = {"queued": "⏳ waiting", "running": "⚙️ running"}.get(j.status, "❌ failed")
-        rows.append(
-            [f"from v{j.params['version']}", j.params.get("prompt") or j.summary, state, ""]
-        )
+        rows.append(["", j.params.get("prompt") or j.summary, state, ""])
         numbers.append(None)
-    for v in line:  # newest first
+    for v in versions:
         if v.mode != "edit_scene":
             continue
         on = v.number == shown

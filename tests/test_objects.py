@@ -374,24 +374,12 @@ def test_object_and_edit_rows() -> None:
     ]
     assert keys == [["placed", "o1"], ["placed", "o2"], ["job", "b"], ["library", "a"]]
     vs = [
-        versions.Version("s1", 5, mode="edit_scene", prompt="snow", parent=1),
-        versions.Version("s1", 4, mode="add_object", prompt="bench", parent=3),
-        versions.Version("s1", 3, mode="edit_scene", prompt="greener", parent=2),
-        versions.Version("s1", 2, mode="add_object", prompt="oak", parent=1),
+        versions.Version("s1", 3, mode="edit_scene", prompt="greener"),
+        versions.Version("s1", 2, mode="add_object", prompt="oak"),
         versions.Version("s1", 1),
     ]
-    edits = [
-        jobs.Job(
-            "e", "edit", "rain", 5.0, status="failed", params={"prompt": "rain", "version": 4}
-        ),
-        jobs.Job("f", "edit", "fog", 6.0, status="running", params={"prompt": "fog", "version": 5}),
-    ]
-    rows, numbers = edit_rows(vs, edits, shown=4)  # line v4 <- v3 <- v2 <- v1: not v5
-    assert rows == [["from v4", "rain", "❌ failed", ""], ["v3", "greener", "", "Show"]]
+    edits = [jobs.Job("e", "edit", "rain", 5.0, status="failed", params={"prompt": "rain"})]
+    rows, numbers = edit_rows(vs, edits, shown=2)
+    assert rows == [["", "rain", "❌ failed", ""], ["v3", "greener", "", "Show"]]
     assert numbers == [None, 3]
     assert edit_rows(vs, [], shown=3)[0] == [["v3", "greener", "● shown", ""]]
-    assert edit_rows(vs, edits, shown=5)[0] == [
-        ["from v5", "fog", "⚙️ running", ""],
-        ["v5", "snow", "● shown", ""],
-    ]
-    assert edit_rows(vs, edits, shown=None) == ([], [])
