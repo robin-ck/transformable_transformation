@@ -1,5 +1,7 @@
 # Tasks: warm-gpu-workers
 
+Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now (no shared files). Task 2.3 and 4.2 wait until the redesign is merged: they edit `space/app.py` and the README, and need its Scene tab and tool sub-tabs.
+
 ## 0. Baseline
 - [ ] 0.1 Read `run.json` of recent object and preview jobs; note time per stage (cold start, load, image, gaussians, upload)
 
