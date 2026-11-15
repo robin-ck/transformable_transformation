@@ -96,6 +96,7 @@ def place_object(
             extra={
                 "object_job": job.job_id,
                 "seed": job.params.get("seed"),
+                "source": job.params.get("source", "text"),
                 "placement": placement.to_dict(),
             },
             objects=[*earlier, new_object],

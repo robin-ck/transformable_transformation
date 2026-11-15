@@ -203,9 +203,16 @@ def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
         sys.modules, "modal", types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=from_name))
     )
     assert modal_client.submit_object("j1", "oak", seed=2) == "fc-9"
+    assert modal_client.submit_object("j3", "", reference_path="objects/j3/input/r.png") == "fc-9"
     assert modal_client.submit_preview("j2", "scenes/s/v1", {"fov": 50}, "warm light") == "fc-9"
     assert calls == [
         ("ObjectGenerator", "generate", ("j1", "oak"), {"seed": 2}),
+        (
+            "ObjectGenerator",
+            "generate",
+            ("j3", ""),
+            {"seed": 0, "reference_path": "objects/j3/input/r.png"},
+        ),
         (
             "PreviewRenderer",
             "render",
