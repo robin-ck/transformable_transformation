@@ -811,8 +811,10 @@ def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
         prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
     )
     if job.status == "failed":
+        gr.Warning(f"The preview could not start. {job.error['message']}")
         return f"**Could not start.** {job.error['message']}", None
     note = " The object being placed is not part of it." if placing else ""
+    gr.Info("Preview started. It takes a few minutes; the image appears below the button.")
     return (
         f"⚙️ Rendering this view of v{version.number} and restyling it (job {job.job_id}).{note}",
         job.job_id,
@@ -831,6 +833,7 @@ def on_preview_tick(preview_job: str | None):
     if job.status == "failed":
         err = job.error or {}
         msg = f"❌ **Preview failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        gr.Warning(f"Preview failed. {err.get('message', '')}".strip())
         return [msg, None, *rest]
     if job.status != "done":
         label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
@@ -845,6 +848,7 @@ def on_preview_tick(preview_job: str | None):
         return ["**The preview image is missing.**", None, *rest]
     seconds = job.run.get("seconds")
     took = f" in {format_elapsed(seconds)}" if seconds else ""
+    gr.Info("Preview ready: see the Preview tab.")
     return [
         f"✅ Preview of **{job.summary}** ready{took}. The scene is unchanged.",
         None,
