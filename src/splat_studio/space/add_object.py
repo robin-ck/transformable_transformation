@@ -106,3 +106,30 @@ def _next_id(objects: list[dict]) -> str:
     """Ids o1, o2, ...: one more than the highest id in the inherited list."""
     numbers = [int(o["id"][1:]) for o in objects if str(o.get("id", ""))[1:].isdigit()]
     return f"o{max(numbers, default=0) + 1}"
+
+
+def object_choices(version: Version | None) -> list[tuple[str, str]]:
+    """(label, id) for each object in `version`, in the order they were added."""
+    if version is None:
+        return []
+    return [
+        (f"{i}. {o.get('prompt') or 'object'}", o["id"])
+        for i, o in enumerate(version.objects, start=1)
+    ]
+
+
+def library_choices(jobs: list[Job], scene_id: str | None) -> list[tuple[str, str]]:
+    """(label, job id) for finished objects generated for `scene_id`, newest first.
+
+    These can be placed again (another copy, or one that was cancelled) without
+    generating them anew.
+    """
+    if not scene_id:
+        return []
+    done = [
+        j for j in jobs
+        if j.kind == "object" and j.status == "done" and j.scene_path
+        and j.params.get("scene_id") == scene_id
+    ]  # fmt: skip
+    done.sort(key=lambda j: j.created_at, reverse=True)
+    return [(f"{j.summary} (seed {j.params.get('seed', 0)}, {j.job_id})", j.job_id) for j in done]

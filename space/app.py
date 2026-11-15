@@ -23,7 +23,13 @@ from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import RegionError, region_from_viewer  # noqa: E402
 from splat_studio.space import prompt_log  # noqa: E402
-from splat_studio.space.add_object import PlaceError, place_object, start_placement  # noqa: E402
+from splat_studio.space.add_object import (  # noqa: E402
+    PlaceError,
+    library_choices,
+    object_choices,
+    place_object,
+    start_placement,
+)
 from splat_studio.space.jobs import (  # noqa: E402
     EDIT_TIMEOUT_S,
     OBJECT_TIMEOUT_S,
@@ -148,11 +154,21 @@ def _shown(version: Version | None) -> str:
 
 
 def _objects_control(version: Version | None):
-    """Show/hide checkboxes for the objects of a version; hidden if it lists none."""
-    if version is None or not version.objects:
-        return gr.update(choices=[], value=[], visible=False)
-    choices = [(f"{o.get('prompt') or 'object'} ({o['id']})", o["id"]) for o in version.objects]
-    return gr.update(choices=choices, value=[o["id"] for o in version.objects], visible=True)
+    """Show/hide checkboxes for the objects of a version (all shown at first)."""
+    choices = object_choices(version)
+    label = OBJECTS_LABEL if choices else OBJECTS_NONE
+    return gr.update(choices=choices, value=[v for _, v in choices], label=label)
+
+
+def on_library(scene_id: str | None):
+    """Objects generated for this scene, to add again. Outputs: library dropdown, add button."""
+    choices = library_choices(OBJECTS.list(refresh=False), scene_id)
+    value = choices[0][1] if choices else None
+    return gr.update(choices=choices, value=value), gr.update(interactive=bool(choices))
+
+
+OBJECTS_LABEL = "Objects in this version (untick to hide; view only, downloads keep all)"
+OBJECTS_NONE = "Objects in this version: none yet (generate one below)"
 
 
 def _hidden_splat(version: Version | None, hidden: list[str] | None):
@@ -451,6 +467,20 @@ def on_object_tick(obj_job, placing, scene_id, number, hidden, show_obj):
     ]
 
 
+def on_add_again(choice, placing, scene_id, number, hidden, show_obj):
+    """Place an object generated earlier, without generating it again.
+
+    Outputs: as `on_object_tick`.
+    """
+    if not choice:
+        raise gr.Error("Pick an object from the list first.")
+    if placing:
+        raise gr.Error("Place or cancel the current object first.")
+    out = on_object_tick(choice, False, scene_id, number, hidden, show_obj)
+    out[1] = choice
+    return out
+
+
 def on_place(scene_id, number, obj_job, x, y, z, turn, size, progress=gr.Progress()):  # noqa: B008 - Gradio's progress idiom
     """Merge the object; opens the new version. Outputs: status, then `SCENE_OUTPUTS`."""
     version = _version(scene_id, number)
@@ -722,10 +752,6 @@ def build() -> gr.Blocks:
                     with gr.Column(scale=3):
                         viewer = gr.HTML(scene_html(STORE, None))
                         shown = gr.Markdown()
-                        objects_shown = gr.CheckboxGroup(
-                            label="Objects shown (view only; downloads keep all objects)",
-                            choices=[], value=[], visible=False,
-                        )  # fmt: skip
                         with gr.Row():
                             get_ply = gr.Button("Download .ply")
                             get_splat = gr.Button("Download .splat (compressed)")
@@ -743,7 +769,23 @@ def build() -> gr.Blocks:
                                     log_table = gr.Dataframe(
                                         headers=prompt_log.COLUMNS, interactive=False, wrap=True
                                     )
-                            with gr.Tab("Add object"):
+                            with gr.Tab("Objects"):
+                                objects_shown = gr.CheckboxGroup(
+                                    label=OBJECTS_LABEL, choices=[], value=[],
+                                )  # fmt: skip
+                                with gr.Accordion("Generated objects", open=False):
+                                    gr.Markdown(
+                                        "Objects made for this scene before; add one again "
+                                        "without waiting for a new generation."
+                                    )
+                                    with gr.Row(equal_height=True):
+                                        obj_library = gr.Dropdown(
+                                            label="Object", choices=[], value=None, scale=3
+                                        )
+                                        obj_again = gr.Button(
+                                            "Add to scene", scale=1, interactive=False
+                                        )
+                                gr.Markdown("**New object**")
                                 obj_prompt = gr.Textbox(
                                     label="Object", placeholder="a mature oak tree"
                                 )
@@ -816,6 +858,7 @@ def build() -> gr.Blocks:
             version, hidden, viewer, download, shown, objects_shown, history_table, *end
         ]  # fmt: skip
         log = (log_outputs, [picker, version], [history, log_table])
+        lib = (on_library, picker, [obj_library, obj_again])
 
         # New scene
         files.change(on_upload, files, [message, create])
@@ -825,17 +868,17 @@ def build() -> gr.Blocks:
         # Start tab, finished-job notice, opening scenes and versions
         demo.load(on_load, [obj_job, placing], [tabs, table, picker, seen, *scene_outputs]).then(
             *log
-        )
+        ).then(*lib)
         gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
         open_newest.click(on_open_newest, [obj_job, placing], [tabs, picker, *scene_outputs]).then(
             *log
-        )
-        picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log)
+        ).then(*lib)
+        picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log).then(*lib)
         history_table.select(
             on_pick_row, [picker, history_table, obj_job, placing], scene_outputs
         ).then(*log)
 
-        # Hide objects (view only)
+        # Objects list: show/hide (view only)
         objects_shown.input(
             on_objects_shown,
             [camera_json, picker, version, objects_shown, obj_job, placing, floor, show_obj,
@@ -859,6 +902,13 @@ def build() -> gr.Blocks:
             slider.input(None, sliders, None, js=PLACEMENT_JS)
         bridge.change(on_bridge, bridge, sliders)
         show_obj.input(None, show_obj, None, js=SHOW_OBJECT_JS)
+        obj_again.click(
+            on_add_again,
+            [obj_library, placing, picker, version, hidden, show_obj],
+            [obj_status, obj_job, placing, viewer, place_group, obj_ref, floor, *sliders],
+        )
+        # A finished object enters placement: list it among the generated objects.
+        placing.change(*lib)
         place_ok.click(
             on_place,
             [picker, version, obj_job, *sliders],

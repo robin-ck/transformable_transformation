@@ -455,3 +455,26 @@ def test_viewer_script_is_valid_javascript(tmp_path: Path) -> None:
         (tmp_path / "viewer.mjs").write_text(script)
         res = subprocess.run([node, "--check", str(tmp_path / "viewer.mjs")], capture_output=True)
         assert res.returncode == 0, res.stderr.decode()[-500:]
+
+
+def test_object_list_and_library_choices() -> None:
+    from splat_studio.space.add_object import library_choices, object_choices
+
+    v = versions.Version(
+        "s1", 3, objects=({"id": "o1", "prompt": "oak"}, {"id": "o2", "prompt": ""})
+    )
+    assert object_choices(v) == [("1. oak", "o1"), ("2. object", "o2")]
+    assert object_choices(None) == []
+
+    def job(i, scene, status="done", kind="object", t=0.0):
+        j = jobs.Job(i, kind, f"thing {i}", t, status=status, scene_path=f"objects/{i}")
+        j.params = {"scene_id": scene, "seed": 2}
+        return j
+
+    listed = [job("a", "s1", t=1), job("b", "s1", t=2), job("c", "s2"),
+              job("d", "s1", status="running"), job("e", "s1", kind="edit")]  # fmt: skip
+    assert library_choices(listed, "s1") == [
+        ("thing b (seed 2, b)", "b"),
+        ("thing a (seed 2, a)", "a"),
+    ]
+    assert library_choices(listed, None) == []
