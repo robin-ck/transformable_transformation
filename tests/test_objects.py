@@ -77,12 +77,37 @@ def test_placement_viewer_and_merge_agree() -> None:
     assert cfg["position"] == [1, 2, 3] and cfg["scale"] == [0.5] * 3
 
 
+def test_tilt_about_x_and_y() -> None:
+    v = gaussians([[0, 0, 1]])
+    assert np.allclose(xyz(objects.apply_placement(v, Placement(tilt_x_deg=90))), [[0, -1, 0]])
+    assert np.allclose(xyz(objects.apply_placement(v, Placement(tilt_y_deg=90))), [[1, 0, 0]])
+
+
+def test_tilt_is_applied_before_turn() -> None:
+    # Tilt top towards +x, then turn 90 deg: the top ends up towards +y.
+    v = gaussians([[0, 0, 1]])
+    out = objects.apply_placement(v, Placement(turn_deg=90, tilt_y_deg=90))
+    assert np.allclose(xyz(out), [[0, 1, 0]], atol=1e-6)
+
+
+def test_tilted_placement_rotates_gaussians_like_points() -> None:
+    p = Placement(turn_deg=30, tilt_x_deg=20, tilt_y_deg=-45)
+    v = gaussians([[0.3, -0.2, 0.7]])
+    out = objects.apply_placement(v, p)
+    q = np.array([out[f"rot_{i}"][0] for i in range(4)])  # existing rotation was identity
+    assert np.allclose(q, p.quaternion_wxyz())
+    assert np.linalg.norm(xyz(out)[0]) == pytest.approx(np.linalg.norm([0.3, -0.2, 0.7]))
+    cfg = p.to_viewer()
+    assert (cfg["tiltX"], cfg["tiltY"]) == (20, -45)
+
+
 def test_turn_drops_higher_order_colour_only_when_turned() -> None:
     v = gaussians([[0, 0, 0]], extra=["f_rest_0"])
     v["f_rest_0"] = 0.7
     assert objects.apply_placement(v, Placement(turn_deg=0))["f_rest_0"][0] == pytest.approx(0.7)
     assert objects.apply_placement(v, Placement(turn_deg=360))["f_rest_0"][0] == pytest.approx(0.7)
     assert objects.apply_placement(v, Placement(turn_deg=45))["f_rest_0"][0] == 0
+    assert objects.apply_placement(v, Placement(tilt_x_deg=10))["f_rest_0"][0] == 0
 
 
 def test_placement_rejects_zero_size() -> None:
