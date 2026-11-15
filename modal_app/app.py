@@ -2,9 +2,9 @@
 
 Deploy:  modal deploy modal_app/app.py
 Spike:   modal run modal_app/app.py::gpu_probe
-Object, preview and image jobs are classes (ObjectGenerator, PreviewRenderer,
-ImageStudio) that load their
-models once per container and stay warm for WARM_S after the last call.
+Object, preview, edit and image jobs are classes (ObjectGenerator, PreviewRenderer,
+SceneEditor, ImageStudio) that load their models once per container and stay warm for
+WARM_S after the last call.
 Needs a Modal secret named `huggingface-secret` with HF_TOKEN, and the env var
 SPLAT_STUDIO_DATASET (e.g. "your-name/splat-studio-data") set on that secret.
 """
@@ -27,26 +27,29 @@ TRAIN_GPU = "A10G"
 TRAIN_TIMEOUT_S = 60 * 60  # hard cap per job to protect the monthly credit
 CPU_CORES = 4.0
 
+# gsplat is built from source with its CUDA kernels. The prebuilt 1.5.3 wheels exist only
+# for Python 3.10; on 3.11 pip took PyPI's pure-Python wheel, which JIT-compiles the
+# kernels on the first render of every new container (70 to 90 s; speed-up-edit-jobs 1).
+# The build container has no GPU, so the CUDA archs are set explicitly:
+# 8.6 = A10G, 8.9 = L4 and L40S. Extensions without isolation see the torch installed
+# above. Modal's add_python interpreter was built with clang, so extensions would look
+# for clang++; point them at the image's gcc instead.
 gsplat_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0")
+    .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0", "build-essential")
     .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
-    .pip_install(
-        f"gsplat=={GSPLAT_VERSION}",
-        extra_index_url="https://docs.gsplat.studio/whl/pt24cu124",
-    )
-    # fused-ssim's setup.py imports torch, so it must build without isolation
-    # (isolated build envs can't see the torch installed above). The build
-    # container has no GPU, so the CUDA arch is set explicitly: 8.6 = A10G.
-    # Modal's add_python interpreter was built with clang, so extensions would
-    # look for clang++; point them at the image's gcc instead.
-    .apt_install("build-essential")
-    .pip_install("setuptools", "wheel")
-    .env({"TORCH_CUDA_ARCH_LIST": "8.6", "CC": "gcc", "CXX": "g++"})
+    .pip_install("setuptools", "wheel", "ninja", "jaxtyping", "rich>=12")
+    .env({"TORCH_CUDA_ARCH_LIST": "8.6;8.9", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
     .run_commands(
-        f"git clone --depth 1 --branch v{GSPLAT_VERSION} "
+        f"git clone --depth 1 --recursive --shallow-submodules --branch v{GSPLAT_VERSION} "
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
+        # The examples' requirements (fused-ssim etc.) do not list gsplat itself; installing
+        # them first means nothing can replace the source build below.
         f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
+        f"pip install --no-build-isolation --no-deps {GSPLAT_DIR}",
+        # Fail the build, not a job, if the compiled kernels are missing.
+        'python -c "import torch, gsplat; from gsplat import csrc; '
+        f"assert gsplat.__version__ == '{GSPLAT_VERSION}', gsplat.__version__\"",
     )
 )
 image = gsplat_image.add_local_python_source("splat_studio")
@@ -59,8 +62,8 @@ OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with splat_studio/space/jobs.py
 TRELLIS_COMMIT = "193e0502b5cb3eb5997ec457d5340e95d09b158e"
 TRELLIS_DIR = "/opt/trellis"
 MODELS_DIR = "/models"  # Modal Volume: weights survive between runs
-# Object and preview containers stay up this long after their last call, with the models
-# loaded. Longer cuts cold starts but bills idle GPU time.
+# Object, preview and edit containers stay up this long after their last call, with the
+# models loaded. Longer cuts cold starts but bills idle GPU time.
 WARM_S = 5 * 60
 
 object_image = (
@@ -137,6 +140,9 @@ preview_image = (
     .add_local_python_source("splat_studio")
 )
 
+# Scene files cached on the models volume (splat_studio.scene_cache); versions never change.
+SCENE_CACHE_DIR = f"{MODELS_DIR}/scene-cache"
+
 # Image editing tab: FLUX.1-schnell for text-to-image and image-to-image. Same GPU as
 # Add object (the 24 GB transformer needs 48 GB), but without TRELLIS's heavy build.
 IMAGE_GPU = OBJECT_GPU
@@ -176,6 +182,52 @@ def _upload_json(api, repo: str, path: str, data: dict) -> None:
         repo_id=repo,
         repo_type="dataset",
     )
+
+
+def _reload_volume() -> None:
+    """See files other containers committed (cached weights and scenes) since this one began."""
+    try:
+        models_volume.reload()
+    except Exception as e:  # e.g. files still open; the job then just misses the cache
+        print(f"volume reload skipped: {e!r}")
+
+
+def _cached_scene_file(repo: str, repo_path: str) -> tuple[Path, bool]:
+    """A dataset scene file from the volume's scene cache, downloading it on a miss."""
+    from huggingface_hub import hf_hub_download
+
+    from splat_studio.scene_cache import SceneCache
+
+    # A temporary HF cache, so scenes do not also pile up in the volume's HF_HOME.
+    with tempfile.TemporaryDirectory(prefix="scene-dl-") as tmp:
+        file, hit = SceneCache(Path(SCENE_CACHE_DIR)).fetch(
+            repo_path, lambda path: hf_hub_download(repo, path, repo_type="dataset", cache_dir=tmp)
+        )
+    if not hit:
+        models_volume.commit()
+    return file, hit
+
+
+def _warm_gsplat(mode: str = "RGB") -> None:
+    """Load gsplat's compiled kernels and the CUDA context once, on a tiny scene."""
+    import torch
+    from gsplat import rasterization
+
+    n = 16
+    with torch.no_grad():
+        rasterization(
+            means=torch.randn(n, 3, device="cuda") * 0.1,
+            quats=torch.nn.functional.normalize(torch.randn(n, 4, device="cuda"), dim=-1),
+            scales=torch.full((n, 3), 0.05, device="cuda"),
+            opacities=torch.full((n,), 0.5, device="cuda"),
+            colors=torch.rand(n, 3, device="cuda"),
+            viewmats=torch.eye(4, device="cuda")[None],
+            Ks=torch.tensor([[32.0, 0, 16], [0, 32.0, 16], [0, 0, 1]], device="cuda")[None],
+            width=32,
+            height=32,
+            render_mode=mode,
+        )
+    torch.cuda.synchronize()
 
 
 @app.function(gpu="T4", timeout=300, secrets=[hf_secret])
@@ -468,127 +520,186 @@ class ObjectGenerator:
         return result
 
 
-@app.function(
+@app.cls(
     image=preview_image,
     gpu=EDIT_GPU,
     timeout=EDIT_TIMEOUT_S,
     secrets=[hf_secret],
     volumes={MODELS_DIR: models_volume},
     retries=0,
+    scaledown_window=WARM_S,
+    max_containers=1,
 )
-def edit_scene(
-    job_id: str,
-    scene_id: str,
-    number: int,
-    camera: dict,
-    prompt: str,
-    region: list[float] | None = None,
-    seed: int = 0,
-    steps: int = 1500,
-) -> dict:
-    """Edit version `number` of a scene from a text instruction; saves the next version.
+class SceneEditor:
+    """Edit a scene version from a text instruction (InstructPix2Pix kept on the GPU).
 
-    Writes the result as a new version itself (scenes/<id>/v<n>/ with version.json),
-    so it is kept even if nobody has the Space open when the job ends. Before/after
-    renders of the user's view go to edits/<job_id>/.
+    Run directly:
+      modal run modal_app/app.py::SceneEditor.edit --job-id test --scene-id <id> --number 1
+        --camera '<ViewCamera json>' --prompt 'make the table green'
     """
-    t = time.time()
-    from huggingface_hub import HfApi, hf_hub_download
 
-    from splat_studio import models
-    from splat_studio.editing import edit_worker, scene_edit
-    from splat_studio.editing.preview import ViewCamera
-    from splat_studio.reconstruction import errors
-    from splat_studio.reconstruction.cost import RunLog
-    from splat_studio.space.jobs import HubStore
-    from splat_studio.space.versions import add_version
+    @modal.enter()
+    def load(self) -> None:
+        from splat_studio.reconstruction.cost import LoadTimes
 
-    repo = os.environ["SPLAT_STUDIO_DATASET"]
-    api = HfApi()
-    prefix = f"edits/{job_id}"
-    log = RunLog(job_id=job_id, gpu=EDIT_GPU)
-    log.stage("imports", time.time() - t)
-    _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
-    spec = models.IMAGE_EDIT
-
-    def on_stage(name: str, seconds: float) -> None:
-        """Log the stage and publish the run log, so the Space can show progress."""
-        log.stage(name, seconds)
+        self.loads = LoadTimes()
+        self.editor = None
         try:
-            _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
-        except Exception as e:  # progress is nice to have; never fail the edit for it
-            print(f"progress upload failed: {e!r}")
+            self._load_models()
+        except Exception as e:  # reported by the next job, which loads again
+            print(f"model load failed in enter: {e!r}")
 
-    try:
-        cam = ViewCamera.from_dict(camera)
-        area = scene_edit.Region(*region) if region else None
+    def _load_models(self) -> None:
+        from splat_studio import models
+
         t = time.time()
-        ply = hf_hub_download(repo, f"scenes/{scene_id}/v{number}/scene.ply", repo_type="dataset")
-        log.stage("download_scene", time.time() - t)
-        with tempfile.TemporaryDirectory() as tmp:
-            res = edit_worker.run_edit(
-                Path(ply),
-                cam,
-                prompt,
-                Path(tmp),
-                model=(spec.repo_id, spec.revision),
-                region=area,
-                settings=edit_worker.EditSettings(steps=steps, seed=seed),
-                on_stage=on_stage,
-            )
-            models_volume.commit()  # keep downloaded weights for the next run
+        from splat_studio.editing import edit_worker
+
+        self.loads.record("imports", time.time() - t)
+        t = time.time()
+        _warm_gsplat()
+        self.loads.record("warm_gsplat", time.time() - t)
+        t = time.time()
+        spec = models.IMAGE_EDIT
+        self.editor = edit_worker.Editor(spec.repo_id, spec.revision)
+        models_volume.commit()  # keep downloaded weights for the next container
+        self.loads.record("load_editor", time.time() - t)
+
+    @modal.method()
+    def edit(
+        self,
+        job_id: str,
+        scene_id: str,
+        number: int,
+        camera: dict,
+        prompt: str,
+        region: list[float] | None = None,
+        seed: int = 0,
+        budget: dict | None = None,
+    ) -> dict:
+        """Edit version `number` of a scene from a text instruction; saves the next version.
+
+        Writes the result as a new version itself (scenes/<id>/v<n>/ with version.json),
+        so it is kept even if nobody has the Space open when the job ends. Before/after
+        renders of the user's view go to edits/<job_id>/. `budget` overrides the work
+        settings (`scene_edit.BUDGET_LIMITS`); missing keys take the default preset.
+        """
+        from huggingface_hub import HfApi
+
+        from splat_studio import models
+        from splat_studio.editing import edit_worker, scene_edit
+        from splat_studio.editing.preview import ViewCamera
+        from splat_studio.reconstruction import errors
+        from splat_studio.reconstruction.cost import RunLog
+        from splat_studio.scene_cache import SceneCache
+        from splat_studio.space.jobs import HubStore
+        from splat_studio.space.versions import add_version
+
+        repo = os.environ["SPLAT_STUDIO_DATASET"]
+        api = HfApi()
+        prefix = f"edits/{job_id}"
+        log = RunLog(job_id=job_id, gpu=EDIT_GPU)
+        spec = models.IMAGE_EDIT
+        _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+
+        def on_stage(name: str, seconds: float) -> None:
+            """Log the stage and publish the run log, so the Space can show progress."""
+            log.stage(name, seconds)
+            try:
+                _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+            except Exception as e:  # progress is nice to have; never fail the edit for it
+                print(f"progress upload failed: {e!r}")
+
+        try:
+            if self.editor is None:
+                self._load_models()  # enter failed: load here so the error is reported
+            self.loads.apply(log)
+            try:
+                settings = edit_worker.settings_for(budget, seed=seed)
+            except ValueError as e:
+                raise errors.edit_failed(str(e)) from e
+            cam = ViewCamera.from_dict(camera)
+            area = scene_edit.Region(*region) if region else None
             t = time.time()
-            # The edited scene goes to edits/<job>/ first, so a failure while saving the
-            # version below does not lose the training result.
-            for name, path in [("before.png", res.before), ("after.png", res.after),
-                               ("edit_example.png", res.example), ("scene.ply", res.ply),
-                               ("scene.splat", res.splat)]:  # fmt: skip
-                api.upload_file(path_or_fileobj=str(path), path_in_repo=f"{prefix}/{name}",
-                                repo_id=repo, repo_type="dataset")  # fmt: skip
-            store = HubStore(repo, os.environ.get("HF_TOKEN"), cache_dir=Path(tmp) / "cache")
-            version = add_version(
-                store,
-                scene_id,
-                {"ply": res.ply, "splat": res.splat},
-                mode="edit_scene",
-                prompt=prompt,
-                model=spec.label,
-                parent=number,
-                extra={
-                    "edit_job": job_id,
-                    "region": area.to_list() if area else None,
-                    "camera": camera,
-                    "seed": seed,
-                    "steps": steps,
-                },
-            )
-            log.stage("upload", time.time() - t)
-        log.finish("done")
-        result = {
-            **log.to_dict(),
-            "scene_path": version.path,
-            "version": version.number,
-            "parent": number,
-            "model": spec.label,
-            "prompt": prompt,
-            "region": area.to_list() if area else None,
-            "num_gaussians": res.num_gaussians,
-            "num_selected": res.num_selected,
-            "size": list(res.size),
-            **res.stats,
-        }
-    except errors.ReconstructionError as e:
-        result = log.finish("failed", e.to_dict()).to_dict()
-    except Exception as e:
-        import traceback
+            _reload_volume()
+            ply, cached = _cached_scene_file(repo, f"scenes/{scene_id}/v{number}/scene.ply")
+            on_stage("download_scene", time.time() - t)
+            with tempfile.TemporaryDirectory() as tmp:
+                res = edit_worker.run_edit(
+                    ply,
+                    cam,
+                    prompt,
+                    Path(tmp),
+                    model=(spec.repo_id, spec.revision),
+                    region=area,
+                    settings=settings,
+                    on_stage=on_stage,
+                    editor=self.editor,
+                )
+                t = time.time()
+                # The edited scene goes to edits/<job>/ first, so a failure while saving
+                # the version below does not lose the training result.
+                for name, path in [("before.png", res.before), ("after.png", res.after),
+                                   ("edit_example.png", res.example), ("scene.ply", res.ply),
+                                   ("scene.splat", res.splat)]:  # fmt: skip
+                    api.upload_file(path_or_fileobj=str(path), path_in_repo=f"{prefix}/{name}",
+                                    repo_id=repo, repo_type="dataset")  # fmt: skip
+                store = HubStore(repo, os.environ.get("HF_TOKEN"), cache_dir=Path(tmp) / "cache")
+                used = {k: getattr(settings, k) for k in scene_edit.BUDGET_LIMITS}
+                version = add_version(
+                    store,
+                    scene_id,
+                    {"ply": res.ply, "splat": res.splat},
+                    mode="edit_scene",
+                    prompt=prompt,
+                    model=spec.label,
+                    parent=number,
+                    extra={
+                        "edit_job": job_id,
+                        "region": area.to_list() if area else None,
+                        "camera": camera,
+                        "seed": seed,
+                        **used,
+                        "preset": scene_edit.preset_of(used),
+                    },
+                )
+                log.stage("upload", time.time() - t)
+                # An edit on this new version can then skip the download.
+                try:
+                    cache = SceneCache(Path(SCENE_CACHE_DIR))
+                    cache.put(f"{version.path}/scene.ply", res.ply)
+                    cache.put(f"{version.path}/scene.splat", res.splat)
+                    models_volume.commit()
+                except Exception as e:  # the cache is an optimisation only
+                    print(f"scene cache write failed: {e!r}")
+            log.finish("done")
+            result = {
+                **log.to_dict(),
+                "scene_path": version.path,
+                "version": version.number,
+                "parent": number,
+                "model": spec.label,
+                "prompt": prompt,
+                "region": area.to_list() if area else None,
+                "num_gaussians": res.num_gaussians,
+                "num_selected": res.num_selected,
+                "size": list(res.size),
+                "scene_cached": cached,
+                "preset": scene_edit.preset_of(used),
+                **res.stats,
+            }
+        except errors.ReconstructionError as e:
+            result = log.finish("failed", e.to_dict()).to_dict()
+        except Exception as e:
+            import traceback
 
-        err = errors.edit_failed(repr(e))
-        err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
-        result = log.finish("failed", err.to_dict()).to_dict()
+            err = errors.edit_failed(repr(e))
+            err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
+            result = log.finish("failed", err.to_dict()).to_dict()
 
-    _upload_json(api, repo, f"{prefix}/run.json", result)
-    print(json.dumps(result))
-    return result
+        _upload_json(api, repo, f"{prefix}/run.json", result)
+        print(json.dumps(result))
+        return result
 
 
 @app.function(image=preview_image, timeout=120, secrets=[hf_secret])
@@ -654,28 +765,13 @@ class PreviewRenderer:
 
         t = time.time()
         from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline
-        from gsplat import rasterization
 
         self.loads.record("imports", time.time() - t)
 
-        # gsplat builds its CUDA kernels on the first call; do it here on a tiny scene.
+        # The kernels are prebuilt in the image; this loads them and the CUDA context.
         t = time.time()
-        n = 16
-        with torch.no_grad():
-            rasterization(
-                means=torch.randn(n, 3, device="cuda") * 0.1,
-                quats=torch.nn.functional.normalize(torch.randn(n, 4, device="cuda"), dim=-1),
-                scales=torch.full((n, 3), 0.05, device="cuda"),
-                opacities=torch.full((n,), 0.5, device="cuda"),
-                colors=torch.rand(n, 3, device="cuda"),
-                viewmats=torch.eye(4, device="cuda")[None],
-                Ks=torch.tensor([[32.0, 0, 16], [0, 32.0, 16], [0, 0, 1]], device="cuda")[None],
-                width=32,
-                height=32,
-                render_mode="RGB+ED",
-            )
-        torch.cuda.synchronize()
-        self.loads.record("compile_gsplat", time.time() - t)
+        _warm_gsplat("RGB+ED")
+        self.loads.record("warm_gsplat", time.time() - t)
 
         t = time.time()
         controlnet = ControlNetModel.from_pretrained(
@@ -713,7 +809,7 @@ class PreviewRenderer:
         import numpy as np
         import torch
         from gsplat import rasterization
-        from huggingface_hub import HfApi, hf_hub_download
+        from huggingface_hub import HfApi
         from PIL import Image
 
         from splat_studio import models
@@ -736,7 +832,8 @@ class PreviewRenderer:
             width, height = preview.output_size(cam.aspect)
 
             t = time.time()
-            splat_file = hf_hub_download(repo, f"{scene_path}/scene.splat", repo_type="dataset")
+            _reload_volume()
+            splat_file, cached = _cached_scene_file(repo, f"{scene_path}/scene.splat")
             g = preview.read_splat(Path(splat_file).read_bytes())
             log.stage("download_scene", time.time() - t)
 
@@ -815,6 +912,7 @@ class PreviewRenderer:
                 "steps": steps,
                 "size": [width, height],
                 "num_gaussians": len(g),
+                "scene_cached": cached,
             }
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()

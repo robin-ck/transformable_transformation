@@ -196,7 +196,7 @@ def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
     def from_name(app: str, cls: str):
         assert app == modal_client.APP_NAME
         return lambda: types.SimpleNamespace(
-            generate=Method(cls, "generate"), render=Method(cls, "render")
+            generate=Method(cls, "generate"), render=Method(cls, "render"), edit=Method(cls, "edit")
         )
 
     monkeypatch.setitem(
@@ -205,6 +205,14 @@ def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
     assert modal_client.submit_object("j1", "oak", seed=2) == "fc-9"
     assert modal_client.submit_object("j3", "", reference_path="objects/j3/input/r.png") == "fc-9"
     assert modal_client.submit_preview("j2", "scenes/s/v1", {"fov": 50}, "warm light") == "fc-9"
+    assert modal_client.submit_edit("e1", "s", 2, {"fov": 50}, "green", budget={"steps": 900})
+    assert calls[-1] == (
+        "SceneEditor",
+        "edit",
+        ("e1", "s", 2, {"fov": 50}, "green"),
+        {"region": None, "seed": 0, "budget": {"steps": 900}},
+    )
+    calls.pop()
     assert modal_client.submit_image("j4", "roof", source_path="images/j4/input/s.png") == "fc-9"
     assert calls == [
         ("ObjectGenerator", "generate", ("j1", "oak"), {"seed": 2}),

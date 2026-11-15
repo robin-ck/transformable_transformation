@@ -65,8 +65,14 @@ def submit_edit(
     prompt: str,
     region: list[float] | None = None,
     seed: int = 0,
+    budget: dict | None = None,
 ) -> str:
-    return spawn("edit_scene", job_id, scene_id, number, camera, prompt, region=region, seed=seed)
+    """`budget` overrides the edit's work settings (`editing.scene_edit.BUDGET_LIMITS`)."""
+    kwargs = {"budget": budget} if budget else {}
+    return spawn_method(
+        "SceneEditor", "edit", job_id, scene_id, number, camera, prompt,
+        region=region, seed=seed, **kwargs,
+    )  # fmt: skip
 
 
 def submit_preview(

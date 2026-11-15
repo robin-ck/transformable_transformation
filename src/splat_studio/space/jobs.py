@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from splat_studio import modal_client, models
+from splat_studio.editing.scene_edit import check_budget
 from splat_studio.reconstruction import errors
 
 from .validation import ValidUpload
@@ -263,19 +264,31 @@ class JobManager:
         camera: dict,
         region: list[float] | None = None,
         seed: int = 0,
+        budget: dict | None = None,
     ) -> Job:
-        """Record an edit job for version `number` of a scene and start it on Modal."""
+        """Record an edit job for version `number` of a scene and start it on Modal.
+
+        `budget` (validated with `scene_edit.check_budget`) sets how much work the edit does.
+        """
+        budget = check_budget(budget)
         now = self.clock()
         job = Job(new_job_id(now), "edit", " ".join(prompt.split())[:80], now)
         job.params = {"prompt": prompt, "scene_id": scene_id, "version": number,
-                      "camera": camera, "region": region, "seed": seed,
+                      "camera": camera, "region": region, "seed": seed, "budget": budget,
                       "model": models.IMAGE_EDIT.label}  # fmt: skip
         self._save(job)
         return self._start(
             job,
             lambda: self.client.submit_edit(
-                job.job_id, scene_id, number, camera, prompt, region=region, seed=seed
-            ),
+                job.job_id,
+                scene_id,
+                number,
+                camera,
+                prompt,
+                region=region,
+                seed=seed,
+                budget=budget,
+            ),  # fmt: skip
         )
 
     def create_preview(

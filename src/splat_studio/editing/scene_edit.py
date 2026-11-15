@@ -281,3 +281,75 @@ def sh_degree(k_total: int) -> int:
     if (d + 1) ** 2 != k_total:
         raise ValueError(f"{k_total} is not a square number of SH coefficients")
     return d
+
+
+# --- budget: how much work an edit does (speed-up-edit-jobs, task 4) ----------------
+
+# The four settings the user may change, with their allowed range. The worker's
+# `EditSettings` (edit_worker.py) has the same field names.
+BUDGET_LIMITS: dict[str, tuple[int, int]] = {
+    "n_views": (8, 60),  # views rendered around the user's view and edited first
+    "steps": (300, 3000),  # training steps on the edited views
+    "edit_every": (5, 50),  # one view is re-edited every this many steps
+    "denoise_steps": (5, 30),  # InstructPix2Pix denoising steps per edit
+}
+# "Best" is the setting of the first edits (MVP 4.4); "Balanced" and "Fast" are runs C
+# and D of design.md. Their quality has not been compared yet (task 4.3).
+BUDGET_PRESETS: dict[str, dict[str, int]] = {
+    "Fast": {"n_views": 24, "steps": 1000, "edit_every": 20, "denoise_steps": 10},
+    "Balanced": {"n_views": 40, "steps": 1500, "edit_every": 20, "denoise_steps": 10},
+    "Best": {"n_views": 40, "steps": 1500, "edit_every": 10, "denoise_steps": 20},
+}
+DEFAULT_PRESET = "Balanced"
+
+
+def check_budget(budget: dict | None) -> dict[str, int]:
+    """The full budget: the default preset, overridden by `budget`. Raises ValueError."""
+    out = dict(BUDGET_PRESETS[DEFAULT_PRESET])
+    for key, value in (budget or {}).items():
+        if key not in BUDGET_LIMITS:
+            raise ValueError(f"unknown edit setting {key!r}")
+        lo, hi = BUDGET_LIMITS[key]
+        whole = isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+        if isinstance(value, bool) or not whole:
+            raise ValueError(f"{key} must be a whole number, got {value!r}")
+        n = int(value)
+        if not lo <= n <= hi:
+            raise ValueError(f"{key} must be between {lo} and {hi}, got {n}")
+        out[key] = n
+    return out
+
+
+def preset_of(budget: dict) -> str | None:
+    """The preset name whose values `budget` matches, else None."""
+    full = check_budget(budget)
+    return next((name for name, p in BUDGET_PRESETS.items() if p == full), None)
+
+
+# Rough times on an A10G for the 1.55 M Gaussian test scene (design.md, "Baseline"):
+# one InstructPix2Pix edit costs about EDIT_BASE_S + EDIT_STEP_S per denoising step run;
+# first edits run 98 % of the steps, re-edits 84 % on average (noise 0.70 to 0.98).
+EDIT_BASE_S, EDIT_STEP_S = 0.12, 0.07
+RENDER_VIEW_S = 0.2  # render + region mask per view, once the kernels are built
+TRAIN_STEP_S = 0.053  # one gsplat training step
+FIXED_S = 40.0  # read the scene, export, upload and save the version
+DOWNLOAD_S = 40.0  # the scene file when it is not cached on the volume
+COLD_S = 30.0  # imports and loading the editor when no container is warm
+
+
+def estimate_edit_breakdown(budget: dict | None) -> dict[str, float]:
+    """Rough seconds per part of a warm job on a cached scene (A10G, test scene)."""
+    b = check_budget(budget)
+    d = b["denoise_steps"]
+    return {
+        "first_edits": b["n_views"] * (RENDER_VIEW_S + EDIT_BASE_S + EDIT_STEP_S * 0.98 * d),
+        "training": b["steps"] * TRAIN_STEP_S,
+        "re_edits": (b["steps"] // b["edit_every"]) * (EDIT_BASE_S + EDIT_STEP_S * 0.84 * d),
+        "saving": FIXED_S,
+    }
+
+
+def estimate_edit_seconds(budget: dict | None, *, warm: bool = True, cached: bool = True) -> float:
+    """Rough job time in seconds for `budget`, counted from the job's container start."""
+    total = sum(estimate_edit_breakdown(budget).values())
+    return total + (0 if cached else DOWNLOAD_S) + (0 if warm else COLD_S)
