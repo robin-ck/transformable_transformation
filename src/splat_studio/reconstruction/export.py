@@ -39,11 +39,41 @@ def read_ply(path: Path) -> np.ndarray:
         return np.fromfile(f, dtype=np.dtype(fields), count=count)
 
 
-def to_splat_bytes(v: np.ndarray) -> bytes:
-    """Encode Gaussians as `.splat`, sorted by size x opacity (largest first)."""
+def ply_vertex_count(path: Path) -> int:
+    """Number of vertices (Gaussians) in a PLY, read from its header only."""
+    with path.open("rb") as f:
+        if f.readline().strip() != b"ply":
+            raise ValueError("not a PLY file")
+        for raw in f:
+            parts = raw.decode("ascii").split()
+            if parts[:2] == ["element", "vertex"]:
+                return int(parts[2])
+            if parts[:1] == ["end_header"]:
+                break
+    return 0
+
+
+def to_splat_bytes(v: np.ndarray, segments: list[int] | None = None) -> bytes:
+    """Encode Gaussians as `.splat`, sorted by size x opacity (largest first).
+
+    With `segments` (counts that add up to `len(v)`), each run of rows is sorted on its
+    own and kept in place, so Gaussian i of segment k stays within that segment's byte
+    range. Used to keep each added object's Gaussians together (they can then be hidden
+    by dropping a byte range). Segment order only changes load order, not the picture.
+    """
     scales = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1))
     opacity = 1.0 / (1.0 + np.exp(-v["opacity"].astype(np.float64)))
-    order = np.argsort(-(scales.prod(axis=1) * opacity), kind="stable")
+    weight = scales.prod(axis=1) * opacity
+    if segments is None:
+        segments = [len(v)]
+    if sum(segments) != len(v) or any(c < 0 for c in segments):
+        raise ValueError("segments must be non-negative and add up to the number of Gaussians")
+    parts, start = [], 0
+    for count in segments:
+        part = np.arange(start, start + count)
+        parts.append(part[np.argsort(-weight[part], kind="stable")])
+        start += count
+    order = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
 
     rgb = 0.5 + SH_C0 * np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=1)
     rgba = np.concatenate([rgb, opacity[:, None]], axis=1)

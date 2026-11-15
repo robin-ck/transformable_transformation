@@ -9,7 +9,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from splat_studio.editing.objects import Placement, default_placement, merge_files
+from splat_studio.reconstruction.export import ply_vertex_count
 
 from .jobs import Job, Store
 from .versions import Version, add_version
@@ -28,6 +31,17 @@ class SliderRanges:
     y: tuple[float, float]
     z: tuple[float, float]
     size: tuple[float, float]
+    floor: float = 0.0  # height of the scene floor; clicks off the splats land on it
+
+
+def floor_height(positions: np.ndarray) -> float:
+    """Height (z) of the scene floor: the 5th percentile of Gaussian heights.
+
+    A low percentile rather than the minimum, so floaters below the ground are ignored.
+    """
+    z = positions[:, 2] if len(positions) else positions.reshape(0)
+    z = z[np.isfinite(z)]
+    return round(float(np.percentile(z, 5)), 3) if len(z) else 0.0
 
 
 def start_placement(store: Store, version: Version) -> tuple[Placement, SliderRanges]:
@@ -35,7 +49,8 @@ def start_placement(store: Store, version: Version) -> tuple[Placement, SliderRa
     splat = store.download(f"{version.path}/scene.splat")
     if splat is None:
         raise PlaceError(f"Version v{version.number} has no scene file.")
-    placement, radius = default_placement(splat_positions(splat))
+    positions = splat_positions(splat)
+    placement, radius = default_placement(positions)
     r = 2 * radius
 
     def around(c: float) -> tuple[float, float]:
@@ -46,6 +61,7 @@ def start_placement(store: Store, version: Version) -> tuple[Placement, SliderRa
         around(placement.y),
         around(placement.z),
         (round(radius / 100, 4), round(r, 3)),
+        floor_height(positions),
     )
     return placement, ranges
 
@@ -62,9 +78,24 @@ def place_object(
     object_ply = store.download(f"{job.scene_path}/object.ply")
     if object_ply is None:
         raise PlaceError("The generated object file is missing.")
+    earlier = list(version.objects)
     with tempfile.TemporaryDirectory() as tmp:
         out_ply, out_splat = Path(tmp) / "scene.ply", Path(tmp) / "scene.splat"
-        merge_files(scene_ply, object_ply, placement, out_ply, out_splat)
+        try:
+            total = merge_files(
+                scene_ply, object_ply, placement, out_ply, out_splat,
+                object_counts=[o["count"] for o in earlier],
+            )  # fmt: skip
+        except ValueError as e:
+            raise PlaceError(f"The scene and its object list do not match ({e}).") from e
+        start = ply_vertex_count(scene_ply)  # the object follows all scene Gaussians
+        new_object = {
+            "id": _next_id(earlier),
+            "prompt": job.params.get("prompt") or job.summary,
+            "object_job": job.job_id,
+            "start": start,
+            "count": total - start,
+        }
         return add_version(
             store,
             version.scene_id,
@@ -79,4 +110,11 @@ def place_object(
                 "seed": job.params.get("seed"),
                 "placement": placement.to_dict(),
             },
+            objects=[*earlier, new_object],
         )
+
+
+def _next_id(objects: list[dict]) -> str:
+    """Ids o1, o2, ...: one more than the highest id in the inherited list."""
+    numbers = [int(o["id"][1:]) for o in objects if str(o.get("id", ""))[1:].isdigit()]
+    return f"o{max(numbers, default=0) + 1}"

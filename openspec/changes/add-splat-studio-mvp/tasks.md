@@ -104,6 +104,9 @@
     placing an object, and when a preview starts or finishes.
   - 2026-11-13: checked locally against HF Hub: v1 history and the two failed preview
     attempts from 4.3 show with prompt and source version.
+  - 2026-11-15: the History sub-tab of `redesign-space-gui` now covers the UI part: a table of
+    versions (date, mode, prompt, model, from) replaces the version list, with "History of vN"
+    and the prompt log below it.
 
 ## 5. Wrap-up
 - [ ] 5.1 End-to-end test: upload → scene → add object → edit → preview

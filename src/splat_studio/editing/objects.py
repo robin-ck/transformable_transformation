@@ -79,6 +79,7 @@ class Placement:
             "position": [self.x, self.y, self.z],
             "quaternion": [qx, qy, qz, w],
             "scale": [self.size] * 3,
+            "turn": self.turn_deg,  # so the viewer's drag-to-turn starts from here
         }
 
     def to_dict(self) -> dict:
@@ -144,12 +145,29 @@ def merge(scene: np.ndarray, obj: np.ndarray) -> np.ndarray:
 
 
 def merge_files(
-    scene_ply: Path, object_ply: Path, placement: Placement, out_ply: Path, out_splat: Path
+    scene_ply: Path,
+    object_ply: Path,
+    placement: Placement,
+    out_ply: Path,
+    out_splat: Path,
+    object_counts: list[int] | None = None,
 ) -> int:
-    """Write the merged scene as `.ply` and `.splat`; returns the number of Gaussians."""
-    merged = merge(read_ply(scene_ply), apply_placement(read_ply(object_ply), placement))
+    """Write the merged scene as `.ply` and `.splat`; returns the number of Gaussians.
+
+    `object_counts` are the sizes of the objects already at the end of `scene_ply`
+    (oldest first, from the parent version's `objects` list). The `.splat` is written in
+    segments: base scene, each earlier object, then the new one (see `to_splat_bytes`),
+    so the new object takes the last `len(object)` Gaussians of both files.
+    """
+    scene = read_ply(scene_ply)
+    obj = apply_placement(read_ply(object_ply), placement)
+    earlier = list(object_counts or [])
+    base = len(scene) - sum(earlier)
+    if base < 0:
+        raise ValueError("object counts exceed the scene's Gaussians")
+    merged = merge(scene, obj)
     write_ply(out_ply, merged)
-    out_splat.write_bytes(to_splat_bytes(merged))
+    out_splat.write_bytes(to_splat_bytes(merged, [base, *earlier, len(obj)]))
     return len(merged)
 
 

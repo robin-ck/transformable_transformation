@@ -16,8 +16,18 @@ the scene with its own position, turn and size. The page listens for
 object live, so dragging a slider does not reload the scene.
 
 Preview (task 4.3): on `{type: "get_camera", id}` the page replies to the sender with
-`{type: "camera", id, matrix, fov, aspect}` (Three.js camera-to-world, column-major),
-so the Modal job can render exactly the view on screen.
+`{type: "camera", id, matrix, fov, aspect, target}` (Three.js camera-to-world,
+column-major; `target` is the orbit centre), so the Modal job can render exactly the
+view on screen, and a reloaded viewer can start where the user was looking.
+
+Click and drag (redesign-space-gui): during placement a click on the scene puts the
+object's base on the clicked splat (the library's raycast), or on the floor plane
+(`floor`, see `add_object.floor_height`) if no splat is hit. Dragging the object moves
+it in the horizontal plane at its current height; Shift-drag turns it. Orbiting is
+paused while dragging. After a click or drag the page posts
+`{type: "placement_changed", x, y, z, turn, size}` to the Space, answers
+`{type: "get_placement", id}` with `{type: "placement", id, ...}`, and shows or hides
+the object on `{type: "object_visible", visible}`.
 """
 
 from __future__ import annotations
@@ -88,11 +98,33 @@ def file_url(path: Path) -> str:
     return "/gradio_api/file=" + Path(path).resolve().as_posix()
 
 
+def camera_from_json(text: str | None, up: tuple[float, float, float] = DEFAULT_UP):
+    """The viewer's camera from a `get_camera` reply (JSON), or None if unusable.
+
+    Used to reopen the viewer at the same view after a reload (e.g. hiding an object).
+    """
+    try:
+        d = json.loads(text or "")
+        m = [float(v) for v in d["matrix"]]
+        target = [float(v) for v in d["target"]]
+    except (ValueError, TypeError, KeyError):
+        return None
+    if len(m) != 16 or len(target) != 3:
+        return None
+    position = np.array(m[12:15])
+    if not (np.isfinite(position).all() and np.isfinite(target).all()):
+        return None
+    if np.linalg.norm(position - np.array(target)) < 1e-6:
+        return None
+    return Camera(_vec(position), _vec(np.array(target)), up)
+
+
 def viewer_document(scene_url: str, camera: Camera, obj: dict | None = None) -> str:
     """Self-contained HTML page that shows one `.splat` scene.
 
     `obj` adds a movable object: {"url": ..., "position": [...], "quaternion": [x, y, z, w],
-    "scale": [...]} (see `editing.objects.Placement.to_viewer`).
+    "scale": [...], "turn": degrees, "floor": z, "visible": bool} (see
+    `editing.objects.Placement.to_viewer`).
     """
     config = json.dumps(
         {
@@ -145,6 +177,8 @@ _PAGE = """<!doctype html>
   #bar button:hover { background: rgba(40,46,60,.9); }
   #help { position: absolute; left: 10px; bottom: 8px; z-index: 10; opacity: .7;
     font-size: 12px; pointer-events: none; }
+  #placehelp { position: absolute; left: 10px; top: 10px; z-index: 10; display: none;
+    font-size: 12px; background: rgba(20,24,32,.8); padding: 4px 8px; border-radius: 6px; }
   #msg { position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; text-align: center; padding: 16px; z-index: 5; }
 </style>
@@ -154,9 +188,135 @@ _PAGE = """<!doctype html>
 <div id="msg">Loading scene…</div>
 <div id="bar"><button id="reset" title="Reset view (R)">Reset view</button></div>
 <div id="help">Drag: orbit · Right-drag / two fingers: pan · Wheel / pinch: zoom · R: reset</div>
+<div id="placehelp">Click the scene: put the object there · Drag it: move · Shift-drag: turn</div>
 <script type="module">
 const cfg = __CONFIG__;
 const msg = document.getElementById("msg");
+const root = document.getElementById("root");
+
+// Placement (task 4.2, click and drag from redesign-space-gui).
+async function setupPlacement(viewer, o) {
+  const THREE = await import("three");
+  const obj = viewer.getSplatScene(1);
+  const p = { x: o.position[0], y: o.position[1], z: o.position[2],
+              turn: Number(o.turn) || 0, size: o.scale[0] };
+  const floor = Number.isFinite(o.floor) ? o.floor : p.z;
+  obj.visible = o.visible !== false;
+  const round = (v, n = 1000) => Math.round(v * n) / n;
+  const apply = () => {
+    const half = p.turn * Math.PI / 360;
+    obj.position.set(p.x, p.y, p.z);
+    obj.quaternion.set(0, 0, Math.sin(half), Math.cos(half));  // turn about z (up)
+    const size = Math.max(p.size, 1e-4);
+    obj.scale.set(size, size, size);
+  };
+  const values = () => ({ x: round(p.x), y: round(p.y), z: round(p.z),
+                          turn: Math.round(p.turn), size: round(p.size, 10000) });
+  const tell = () => {
+    window.parent.postMessage({ type: "placement_changed", ...values() }, "*");
+  };
+
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d) return;
+    if (d.type === "placement") {
+      p.x = Number(d.x); p.y = Number(d.y); p.z = Number(d.z);
+      p.turn = Number(d.turn) || 0; p.size = Number(d.size) || p.size;
+      apply();
+    } else if (d.type === "get_placement" && e.source) {
+      e.source.postMessage({ type: "placement", id: d.id, ...values() }, "*");
+    } else if (d.type === "object_visible") {
+      obj.visible = !!d.visible;
+    }
+  });
+
+  // Rays from a pointer event.
+  const ray = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const rayAt = (e) => {
+    const r = root.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, viewer.camera);
+    return ray.ray;
+  };
+  const onPlane = (r, z) => {
+    if (Math.abs(r.direction.z) < 1e-6) return null;
+    const t = (z - r.origin.z) / r.direction.z;
+    return t > 0 ? r.origin.clone().addScaledVector(r.direction, t) : null;
+  };
+  // The object is normalised: base centre at the origin, largest side 1.
+  const box = new THREE.Box3(new THREE.Vector3(-0.5, -0.5, 0), new THREE.Vector3(0.5, 0.5, 1));
+  const inverse = new THREE.Matrix4();
+  const hitsObject = (r) => {
+    if (!obj.visible) return false;
+    obj.updateMatrixWorld(true);
+    inverse.copy(obj.matrixWorld).invert();
+    return r.clone().applyMatrix4(inverse).intersectsBox(box);
+  };
+
+  // Click: the viewer's own click handler (which would move the orbit centre) is
+  // replaced, so a click puts the object's base on the clicked point instead.
+  viewer.onMouseClick = (mouse) => {
+    const r = rayAt(mouse);
+    let point = null;
+    try {
+      const hits = [], dims = new THREE.Vector2(root.offsetWidth, root.offsetHeight);
+      const wasVisible = obj.visible;
+      obj.visible = false;  // raycast the scene, not the object itself
+      viewer.raycaster.setFromCameraAndScreenPosition(
+        viewer.camera, new THREE.Vector2(mouse.offsetX, mouse.offsetY), dims);
+      viewer.raycaster.intersectSplatMesh(viewer.splatMesh, hits);
+      obj.visible = wasVisible;
+      if (hits.length && hits[0].origin && Number.isFinite(hits[0].origin.x)) {
+        point = hits[0].origin.clone();
+      }
+    } catch (err) { console.warn("splat raycast failed, using the floor plane", err); }
+    if (!point) point = onPlane(r, floor);
+    if (!point) return;
+    p.x = point.x; p.y = point.y; p.z = point.z;
+    apply(); tell();
+  };
+
+  // Drag (capture phase, so orbiting never sees a drag that starts on the object).
+  let drag = null;
+  root.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const r = rayAt(e);
+    if (!hitsObject(r)) return;
+    const start = onPlane(r, p.z);
+    drag = { id: e.pointerId, shift: e.shiftKey, x0: e.clientX, turn0: p.turn,
+             offset: start ? new THREE.Vector3(p.x - start.x, p.y - start.y, 0) : null };
+    if (viewer.controls) viewer.controls.enabled = false;
+    root.setPointerCapture(e.pointerId);
+    root.style.cursor = "grabbing";
+    e.stopPropagation(); e.preventDefault();
+  }, true);
+  root.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id) {
+      if (!drag && e.buttons === 0) root.style.cursor = hitsObject(rayAt(e)) ? "grab" : "";
+      return;
+    }
+    if (drag.shift || e.shiftKey) {
+      let t = drag.turn0 + (e.clientX - drag.x0) * 0.5;
+      p.turn = ((t + 180) % 360 + 360) % 360 - 180;
+    } else if (drag.offset) {
+      const q = onPlane(rayAt(e), p.z);
+      if (q) { p.x = q.x + drag.offset.x; p.y = q.y + drag.offset.y; }
+    }
+    apply();
+    e.stopPropagation();
+  }, true);
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    if (viewer.controls) viewer.controls.enabled = true;
+    root.style.cursor = "";
+    e.stopPropagation();
+    tell();
+  };
+  root.addEventListener("pointerup", end, true);
+  root.addEventListener("pointercancel", end, true);
+}
 try {
   const GS = await import("__VIEWER__");
   const viewer = new GS.Viewer({
@@ -186,8 +346,9 @@ try {
     const d = e.data, c = viewer.camera;
     if (!d || d.type !== "get_camera" || !c || !e.source) return;
     c.updateMatrixWorld();
+    const t = viewer.controls ? viewer.controls.target : null;
     e.source.postMessage({ type: "camera", id: d.id, matrix: Array.from(c.matrixWorld.elements),
-      fov: c.fov, aspect: c.aspect }, "*");
+      fov: c.fov, aspect: c.aspect, target: t ? [t.x, t.y, t.z] : null }, "*");
   });
   if (cfg.object) {
     const o = cfg.object;
@@ -196,16 +357,8 @@ try {
       { path: o.url, format: GS.SceneFormat.Splat,
         position: o.position, rotation: o.quaternion, scale: o.scale },
     ], true);
-    window.addEventListener("message", (e) => {
-      const d = e.data;
-      if (!d || d.type !== "placement") return;
-      const obj = viewer.getSplatScene(1);
-      const half = (Number(d.turn) || 0) * Math.PI / 360;
-      obj.position.set(Number(d.x), Number(d.y), Number(d.z));
-      obj.quaternion.set(0, 0, Math.sin(half), Math.cos(half));  // turn about z (up)
-      const size = Math.max(Number(d.size) || 0, 1e-4);
-      obj.scale.set(size, size, size);
-    });
+    await setupPlacement(viewer, o);
+    document.getElementById("placehelp").style.display = "block";
   } else {
     await viewer.addSplatScene(cfg.url, {
       format: GS.SceneFormat.Splat, showLoadingUI: true, progressiveLoad: true,
@@ -229,17 +382,22 @@ def scene_html(
     height: int = 560,
     object_path: str | None = None,
     placement: dict | None = None,
+    splat: Path | None = None,
+    camera: Camera | None = None,
 ) -> str:
     """Viewer (or a message) for the scene version stored under `scene_path`.
 
-    `store` is a `jobs.Store`; the `.splat` file is fetched to local disk first.
-    With `object_path` (an object job folder) and `placement` (`Placement.to_viewer()`),
-    the generated object is shown too and can be moved live.
+    `store` is a `jobs.Store`; the `.splat` file is fetched to local disk first, unless
+    `splat` gives a local file to show instead (e.g. with hidden objects removed).
+    With `object_path` (an object job folder) and `placement` (`Placement.to_viewer()`,
+    plus optional "floor" and "visible"), the generated object is shown too and can be
+    moved live. `camera` keeps the user's view across a reload.
     """
     if not scene_path:
         return placeholder("Pick a finished scene to view it here.", height)
     try:
-        splat = store.download(f"{scene_path}/scene.splat")
+        if splat is None:
+            splat = store.download(f"{scene_path}/scene.splat")
     except Exception as e:  # network or auth trouble: say so instead of crashing the UI
         return placeholder(f"The scene file could not be fetched ({type(e).__name__}).", height)
     if splat is None:
@@ -255,4 +413,5 @@ def scene_html(
         if obj_splat is None:
             return placeholder(f"No object file found in {object_path}.", height)
         obj = {"url": file_url(obj_splat), **(placement or {})}
-    return viewer_iframe(file_url(splat), camera_for(splat_positions(splat)), height, obj)
+    camera = camera or camera_for(splat_positions(splat))
+    return viewer_iframe(file_url(splat), camera, height, obj)

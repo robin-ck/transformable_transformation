@@ -1,4 +1,5 @@
 import html
+import json
 import sys
 import types
 from pathlib import Path
@@ -15,6 +16,7 @@ from splat_studio.space.validation import UploadError, validate_upload
 
 def _files(tmp_path: Path, n: int, ext: str = ".jpg", size: int = 10) -> list[Path]:
     out = []
+    tmp_path.mkdir(parents=True, exist_ok=True)
     for i in range(n):
         p = tmp_path / f"f{i:03d}{ext}"
         p.write_bytes(b"x" * size)
@@ -281,6 +283,24 @@ def test_scene_html_from_store(tmp_path: Path) -> None:
     assert store.file_dir == tmp_path
 
 
+def test_camera_from_viewer_reply_keeps_view() -> None:
+    reply = {"matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1], "target": [1, 2, 3]}
+    cam = viewer.camera_from_json(json.dumps(reply))
+    assert cam == viewer.Camera((5.0, 6.0, 7.0), (1.0, 2.0, 3.0), viewer.DEFAULT_UP)
+    assert viewer.camera_from_json("") is None
+    assert viewer.camera_from_json(json.dumps({**reply, "target": None})) is None
+    assert viewer.camera_from_json(json.dumps({**reply, "target": [5, 6, 7]})) is None
+
+
+def test_scene_html_uses_given_splat_and_camera(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path / "store")
+    other = tmp_path / "filtered.splat"
+    other.write_bytes(np.zeros((2, 8), dtype="<f4").tobytes())
+    cam = viewer.Camera((9.0, 9.0, 9.0), (0.0, 0.0, 0.0))
+    out = html.unescape(viewer.scene_html(store, "scenes/j1/v1", splat=other, camera=cam))
+    assert "filtered.splat" in out and '"position": [9.0, 9.0, 9.0]' in out
+
+
 def test_scene_html_reports_fetch_error() -> None:
     class Broken:
         def download(self, path: str) -> Path | None:
@@ -317,6 +337,37 @@ def test_versions_list_newest_first_with_v1_fallback(tmp_path: Path) -> None:
     assert listed[1] == v2 and listed[2].created_at == 1e9 and listed[2].mode == "reconstruction"
     assert listed[1].label() == 'v2 · 2033-05-18 03:33 UTC · edit scene: "make the façade green"'
     assert "date unknown" in versions.list_versions(store, "j1")[2].label()
+
+
+def test_history_rows_include_v1_without_version_json(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path / "store")
+    store.upload_files({"scenes/j1/v1/scene.splat": _scene_files(tmp_path, "a")["splat"]})
+    versions.add_version(
+        store, "j1", _scene_files(tmp_path, "b"), mode="add_object",
+        prompt="a mature\noak tree", model="flux + trellis", parent=1, now=2e9,
+    )  # fmt: skip
+    listed = versions.list_versions(store, "j1", v1_created_at=1e9)
+    rows = versions.history_rows(listed, v1_input="video · 42 s")
+    assert versions.HISTORY_COLUMNS == ["Version", "Date", "Mode", "Prompt", "Model", "From"]
+    assert rows == [
+        ["v2", "2033-05-18 03:33 UTC", "add object", "a mature oak tree", "flux + trellis", "v1"],
+        ["v1", "2001-09-09 01:46 UTC", "reconstruction", "video · 42 s", "", ""],
+    ]
+    assert versions.history_rows(versions.list_versions(store, "j1"))[1][1:4] == [
+        "date unknown", "reconstruction", "",
+    ]  # fmt: skip
+    assert versions.version_from_row(rows[0]) == 2
+    assert versions.version_from_row(["x"]) is None and versions.version_from_row([]) is None
+
+
+def test_versions_skip_malformed_objects(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path)
+    store.write_json(
+        "scenes/j1/v2/version.json",
+        {"mode": "add_object", "objects": [{"id": "o1", "start": 5, "count": 3}, {"id": "o2"}]},
+    )
+    [v2] = versions.list_versions(store, "j1")
+    assert [o["id"] for o in v2.objects] == ["o1"]
 
 
 def test_versions_sort_numerically(tmp_path: Path) -> None:

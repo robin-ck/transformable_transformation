@@ -196,3 +196,88 @@ def test_place_object_refuses_unfinished_job(tmp_path: Path) -> None:
     with pytest.raises(PlaceError):
         place_object(store, v1, replace(job, status="running"), Placement())
     assert store.list_dirs("scenes/s1") == ["v1"]
+
+
+# --- hideable objects (redesign-space-gui 4.1, 4.2) -----------------------------
+
+
+def test_splat_segments_sort_within_each_segment() -> None:
+    v = gaussians([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
+    v["scale_0"] = [0.0, 1.0, 0.0, 2.0]  # larger last within each pair
+    flat = np.frombuffer(export.to_splat_bytes(v), dtype="<f4").reshape(-1, 8)
+    seg = np.frombuffer(export.to_splat_bytes(v, [2, 2]), dtype="<f4").reshape(-1, 8)
+    assert list(flat[:, 0]) == [3, 1, 0, 2]  # one sort over all
+    assert list(seg[:, 0]) == [1, 0, 3, 2]  # each pair sorted on its own, kept in place
+    with pytest.raises(ValueError):
+        export.to_splat_bytes(v, [3, 2])
+
+
+def test_ply_vertex_count_reads_header(tmp_path: Path) -> None:
+    export.write_ply(tmp_path / "a.ply", gaussians(box([0] * 3, [1] * 3, n=3)))
+    assert export.ply_vertex_count(tmp_path / "a.ply") == 27
+
+
+def test_two_added_objects_keep_their_ranges(tmp_path: Path) -> None:
+    from splat_studio.space import versions
+    from splat_studio.space.add_object import place_object
+
+    store, v1, job, n_scene = _store_with_scene(tmp_path)
+    n_obj = 11**3
+    v2 = place_object(store, v1, job, Placement(x=1, y=1, z=1, size=0.5), now=100.0)
+    v3 = place_object(store, v2, job, Placement(x=3, y=3, z=1, size=0.5), now=200.0)
+    listed = {v.number: v for v in versions.list_versions(store, "s1")}
+    assert listed[1].objects == ()
+    assert [o["id"] for o in listed[2].objects] == ["o1"]
+    o1, o2 = listed[3].objects
+    assert (o1["id"], o1["start"], o1["count"]) == ("o1", n_scene, n_obj)
+    assert (o2["id"], o2["start"], o2["count"]) == ("o2", n_scene + n_obj, n_obj)
+    assert o2["prompt"] == "a mature oak tree" and o2["object_job"] == "o1"
+    assert v3.objects == listed[3].objects
+    # Each object's byte range in the .splat holds exactly that object's Gaussians.
+    splat = np.frombuffer(store.download("scenes/s1/v3/scene.splat").read_bytes(), "<f4")
+    pos = splat.reshape(-1, 8)[:, :3]
+    first = pos[o1["start"] : o1["start"] + o1["count"]]
+    second = pos[o2["start"] : o2["start"] + o2["count"]]
+    assert np.allclose(first[:, :2].mean(axis=0), [1, 1], atol=0.01)
+    assert np.allclose(second[:, :2].mean(axis=0), [3, 3], atol=0.01)
+    assert pos[: o1["start"], 2].min() >= 0 and pos[: o1["start"], 2].max() <= 1.0
+
+
+def test_filtered_splat_drops_hidden_objects_and_is_cached(tmp_path: Path) -> None:
+    from splat_studio.space import versions
+    from splat_studio.space.add_object import place_object
+
+    store, v1, job, n_scene = _store_with_scene(tmp_path)
+    v2 = place_object(store, v1, job, Placement(x=1, y=1, z=1, size=0.5))
+    v3 = place_object(store, v2, job, Placement(x=3, y=3, z=1, size=0.5))
+    full = store.download(f"{v3.path}/scene.splat")
+    assert versions.filtered_splat(store, v3, []) == full
+    assert versions.filtered_splat(store, v3, ["o9"]) == full  # unknown id: nothing hidden
+    only_o2 = versions.filtered_splat(store, v3, {"o1"})
+    data = full.read_bytes()
+    o1, o2 = v3.objects
+    assert only_o2.read_bytes() == data[: o1["start"] * 32] + data[o2["start"] * 32 :]
+    neither = versions.filtered_splat(store, v3, ["o2", "o1"])
+    assert neither.read_bytes() == data[: n_scene * 32]
+    assert neither.name == "s1-v3-o1-o2.splat" and neither.parent.name == "hidden"
+    mtime = neither.stat().st_mtime_ns
+    assert versions.filtered_splat(store, v3, ["o1", "o2"]).stat().st_mtime_ns == mtime
+    # Downloads stay complete.
+    assert versions.download_file(store, v3, "splat").read_bytes() == data
+
+
+def test_floor_height_ignores_floaters_below_ground() -> None:
+    from splat_studio.space.add_object import floor_height
+
+    ground = box([0, 0, 2], [4, 4, 2.0], n=20)
+    pts = np.vstack([ground, box([1, 1, 2], [2, 2, 5], n=10), [[0, 0, -50]] * 5])
+    assert floor_height(pts) == pytest.approx(2.0, abs=0.01)
+    assert floor_height(np.zeros((0, 3))) == 0.0
+
+
+def test_start_placement_reports_floor(tmp_path: Path) -> None:
+    from splat_studio.space.add_object import start_placement
+
+    store, v1, _job, _n = _store_with_scene(tmp_path)
+    _placement, ranges = start_placement(store, v1)
+    assert ranges.floor == pytest.approx(0.0, abs=0.3)
