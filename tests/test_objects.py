@@ -374,12 +374,47 @@ def test_object_and_edit_rows() -> None:
     ]
     assert keys == [["placed", "o1"], ["placed", "o2"], ["job", "b"], ["library", "a"]]
     vs = [
-        versions.Version("s1", 3, mode="edit_scene", prompt="greener"),
-        versions.Version("s1", 2, mode="add_object", prompt="oak"),
+        versions.Version("s1", 5, mode="edit_scene", prompt="snow", parent=1),
+        versions.Version("s1", 4, mode="edit_scene", prompt="paint", parent=3),
+        versions.Version("s1", 3, mode="edit_scene", prompt="greener", parent=2),
+        versions.Version("s1", 2, mode="add_object", prompt="oak", parent=1),
         versions.Version("s1", 1),
     ]
     edits = [jobs.Job("e", "edit", "rain", 5.0, status="failed", params={"prompt": "rain"})]
-    rows, numbers = edit_rows(vs, edits, shown=2)
-    assert rows == [["", "rain", "❌ failed", ""], ["v3", "greener", "", "Show"]]
-    assert numbers == [None, 3]
-    assert edit_rows(vs, [], shown=3)[0] == [["v3", "greener", "● shown", ""]]
+    rows, keys = edit_rows(vs, edits, shown=4)
+    assert rows == [
+        ["", "rain", "❌ failed", ""],
+        ["v5", "snow", "", "Open"],
+        ["v4", "paint", "in scene", "🚫 Hide"],
+        ["v3", "greener", "in scene", "🚫 Hide"],
+    ]
+    assert keys == [["job", None], ["other", 5], ["line", 4], ["line", 3]]
+    rows, _ = edit_rows(vs, [], shown=4, hidden=["e3", "o1"])
+    assert rows[1:] == [
+        ["v4", "paint", "hidden (with v3)", ""],
+        ["v3", "greener", "hidden", "👁 Show"],
+    ]
+
+
+def test_hidden_edit_shows_parent_plus_later_objects(tmp_path: Path) -> None:
+    from splat_studio.space import versions
+    from splat_studio.space.add_object import place_object
+
+    store, v1, job, n_scene = _store_with_scene(tmp_path)
+    edited = gaussians(box([0, 0, 5], [4, 4, 6], n=4))  # an "edit" of v1: other Gaussians
+    files = {"ply": tmp_path / "e.ply", "splat": tmp_path / "e.splat"}
+    export.write_ply(files["ply"], edited)
+    files["splat"].write_bytes(export.to_splat_bytes(edited))
+    v2 = versions.add_version(store, "s1", files, mode="edit_scene", prompt="lift", parent=1)
+    v3 = place_object(store, v2, job, Placement(x=1, y=1, z=1, size=0.5))
+    vs = versions.list_versions(store, "s1")
+    v3 = vs[0]
+    full = store.download(f"{v3.path}/scene.splat").read_bytes()
+    base = store.download(f"{v1.path}/scene.splat").read_bytes()
+    (o1,) = v3.objects
+    obj = full[o1["start"] * 32 : (o1["start"] + o1["count"]) * 32]
+    assert versions.view_splat(store, v3, vs, ["e2"]).read_bytes() == base + obj
+    assert versions.view_splat(store, v3, vs, ["e2", "o1"]).read_bytes() == base
+    assert versions.view_splat(store, v3, vs, []).read_bytes() == full
+    v2 = next(v for v in vs if v.number == 2)
+    assert versions.view_splat(store, v2, vs, ["e2"]).read_bytes() == base

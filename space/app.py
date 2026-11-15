@@ -54,6 +54,7 @@ from splat_studio.space.versions import (  # noqa: E402
     history_rows,
     list_versions,
     version_from_row,
+    view_splat,
 )
 from splat_studio.space.viewer import camera_from_json, scene_html  # noqa: E402
 
@@ -164,10 +165,13 @@ def _shown(version: Version | None) -> str:
 
 
 def _hidden_splat(version: Version | None, hidden: list[str] | None):
-    """Local `.splat` without the hidden objects, or None to use the version's own file."""
+    """Local `.splat` without the hidden objects and edits, or None to use the version's
+    own file."""
     if version is None or not hidden:
         return None
     try:
+        if any(str(h).startswith("e") for h in hidden):
+            return view_splat(STORE, version, _versions(version.scene_id), hidden)
         return filtered_splat(STORE, version, hidden)
     except Exception:  # fall back to the full scene rather than break the viewer
         return None
@@ -285,7 +289,7 @@ def on_tables(scene_id, number, hidden, moving):
     jobs = OBJECTS.list(refresh=False)
     rows, keys = object_rows(version, hidden, jobs, scene_id, moving)
     edits = [j for j in EDITS.list(refresh=False) if j.params.get("scene_id") == scene_id]
-    e_rows, numbers = edit_rows(_versions(scene_id), edits, number)
+    e_rows, numbers = edit_rows(_versions(scene_id), edits, number, hidden)
     return gr.update(value=rows), keys, gr.update(value=e_rows), numbers
 
 
@@ -416,15 +420,48 @@ OBJECT_SELECT_JS = """async (...args) => {
 }"""
 
 
-def on_edit_select(scene_id, numbers, obj_job, placing, evt: gr.SelectData):
-    """A click on an edit row opens its version (one edit is shown at a time)."""
-    row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    number = numbers[row] if numbers and 0 <= row < len(numbers) else None
-    if number is None:
-        return tuple(gr.skip() for _ in range(10))
+def on_edit_select(
+    camera_json, scene_id, show_obj, number, hidden, keys, obj_job, placing, moving, floor,
+    evt: gr.SelectData,
+):  # fmt: skip
+    """A click in the edits table. Outputs: `SCENE_OUTPUTS`.
+
+    Hide/Show on an edit the shown version builds on: view the scene without it (its
+    parent plus the objects placed later; view only). Open on another edit, or a click
+    elsewhere in its row: open that edit's version.
+    """
+    skip = [gr.skip()] * 10
+    row, col = (evt.index if isinstance(evt.index, (list, tuple)) else (evt.index, 0))[:2]
+    kind, edit = keys[row] if keys and 0 <= row < len(keys) else ("job", None)
+    if edit is None:
+        return skip
+    action = str(evt.value)
+    if kind == "line" and col == len(EDIT_COLUMNS) - 1 and ("Hide" in action or "Show" in action):
+        version = _version(scene_id, number)
+        if version is None:
+            return skip
+        key = f"e{edit}"
+        hidden = list(hidden or [])
+        # Follow the clicked label, not a toggle: one click can fire `select` twice.
+        if "Show" in action:
+            hidden = [h for h in hidden if h != key]
+        elif key not in hidden:
+            hidden = [*hidden, key]
+        try:
+            values = parse_placement(json.dumps(json.loads(camera_json or "{}").get("placement")))
+        except (ValueError, AttributeError):
+            values = None
+        viewer = _reload(
+            camera_json, version, hidden, obj_job, placing, moving, floor, show_obj, values
+        )
+        out = list(skip)
+        out[1], out[2] = hidden, viewer
+        return out
     if placing:
         raise gr.Error("Save or cancel the current object first.")
-    return scene_view(scene_id, number, obj_job, placing)
+    if edit == number and not hidden:
+        return skip  # already shown
+    return scene_view(scene_id, edit, obj_job, placing)
 
 
 # --- add object (task 4.2; click and drag from redesign-space-gui 3) ------------------
@@ -940,7 +977,7 @@ def build() -> gr.Blocks:
                                 edits_table = gr.Dataframe(
                                     headers=EDIT_COLUMNS, interactive=False, wrap=True,
                                     type="array", elem_id="edits-table",
-                                    label="Edits (one is shown at a time; click Show to open it)",
+                                    label="Edits (Hide: view the scene before it; Open: show it)",
                                 )  # fmt: skip
                                 gr.Markdown(
                                     "Change the scene itself from an instruction; the result "
@@ -1022,10 +1059,12 @@ def build() -> gr.Blocks:
         # Edits table: open one edit's version
         edits_table.select(
             on_edit_select,
-            [picker, edit_numbers, obj_job, placing],
+            [camera_json, picker, show_obj, version, hidden, edit_numbers, obj_job, placing,
+             moving, floor],
             scene_outputs,
+            js=OBJECT_SELECT_JS,
             trigger_mode="once",
-        ).then(*log).then(*lib)
+        ).then(*log).then(*lib)  # fmt: skip
 
         # Add object
         clicked(

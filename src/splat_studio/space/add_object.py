@@ -256,25 +256,42 @@ def object_rows(
 
 
 def edit_rows(
-    versions: list[Version], edit_jobs: list[Job], shown: int | None
-) -> tuple[list[list[str]], list[int | None]]:
-    """Rows of the edits table (newest first) and, per row, the version it opens.
+    versions: list[Version], edit_jobs: list[Job], shown: int | None, hidden=None
+) -> tuple[list[list[str]], list[list]]:
+    """Rows of the edits table (newest first) and, per row, a key [kind, version number].
 
-    Every scene edit is listed; only one can be shown at a time (the open version).
-    Edits still running or failed are listed without an action.
+    Kinds: "line" (an edit the shown version builds on: Hide/Show, view only; a hidden
+    edit also hides the edits after it), "other" (an edit on another branch: Open) and
+    "job" (still running or failed: no action).
     """
+    by_number = {v.number: v for v in versions}
+    line, current = [], by_number.get(shown) if shown else None
+    while current is not None and current.number not in line:
+        line.append(current.number)
+        current = by_number.get(current.parent) if current.parent else None
+    hidden_edits = {
+        int(h[1:]) for h in (hidden or ()) if h[:1] == "e" and h[1:].isdigit()
+    }  # fmt: skip
+    first_hidden = min((n for n in line if n in hidden_edits), default=None)
     rows: list[list[str]] = []
-    numbers: list[int | None] = []
+    keys: list[list] = []
     for j in sorted(edit_jobs, key=lambda j: j.created_at, reverse=True):
         if j.status == "done":
             continue
         state = {"queued": "⏳ waiting", "running": "⚙️ running"}.get(j.status, "❌ failed")
         rows.append(["", j.params.get("prompt") or j.summary, state, ""])
-        numbers.append(None)
+        keys.append(["job", None])
     for v in versions:
         if v.mode != "edit_scene":
             continue
-        on = v.number == shown
-        rows.append([f"v{v.number}", v.prompt or "", "● shown" if on else "", "" if on else "Show"])
-        numbers.append(v.number)
-    return rows, numbers
+        if v.number not in line:
+            status, action, kind = "", "Open", "other"
+        elif v.number in hidden_edits:
+            status, action, kind = "hidden", "👁 Show", "line"
+        elif first_hidden is not None and v.number > first_hidden:
+            status, action, kind = f"hidden (with v{first_hidden})", "", "line"
+        else:
+            status, action, kind = "in scene", "🚫 Hide", "line"
+        rows.append([f"v{v.number}", v.prompt or "", status, action])
+        keys.append([kind, v.number])
+    return rows, keys

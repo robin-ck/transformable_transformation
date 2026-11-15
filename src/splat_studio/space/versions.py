@@ -263,3 +263,45 @@ def filtered_splat(store: Store, version: Version, hidden: list[str] | set[str])
                 remaining -= len(chunk)
     tmp.replace(target)
     return target
+
+
+def view_splat(
+    store: Store, version: Version, versions: list[Version], hidden: list[str] | set[str]
+) -> Path | None:
+    """Local `.splat` to view `version` with hidden objects ("o2") and edits ("e5").
+
+    An edit cannot be cut out, so hiding edit vN shows vN's parent instead, plus the
+    objects placed after the last edit (`version.objects`; edits keep no object list,
+    so objects placed between two edits are part of the later edit). With several
+    hidden edits the earliest one counts. View only; downloads keep the full files.
+    """
+    hidden = set(hidden or ())
+    edits = {int(h[1:]) for h in hidden if h[:1] == "e" and h[1:].isdigit()}
+    by_number = {v.number: v for v in versions}
+    line, current = [], version
+    while current is not None and current not in line:
+        line.append(current)
+        current = by_number.get(current.parent) if current.parent else None
+    cut = [v for v in line if v.number in edits and v.mode == "edit_scene" and v.parent]
+    parent = by_number.get(cut[-1].parent) if cut else None  # line is newest first
+    if parent is None:
+        return filtered_splat(store, version, hidden)
+    base = store.download(f"{parent.path}/{FILES['splat']}")
+    full = store.download(f"{version.path}/{FILES['splat']}")
+    if base is None or full is None:
+        return None
+    keep = [o for o in version.objects if o["id"] not in hidden]
+    ids = "-".join([f"e{cut[-1].number}", *sorted(o["id"] for o in keep)])
+    target = Path(store.file_dir) / "hidden" / f"{version.scene_id}-v{version.number}-x{ids}.splat"
+    if target.is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".part")
+    with tmp.open("wb") as out:
+        out.write(base.read_bytes())
+        with full.open("rb") as f:
+            for o in keep:
+                f.seek(o["start"] * SPLAT_RECORD_BYTES)
+                out.write(f.read(o["count"] * SPLAT_RECORD_BYTES))
+    tmp.replace(target)
+    return target
