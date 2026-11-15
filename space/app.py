@@ -945,7 +945,7 @@ def build() -> gr.Blocks:
                                 edits_table = gr.Dataframe(
                                     headers=EDIT_COLUMNS, interactive=False, wrap=True,
                                     type="array", elem_id="edits-table",
-                                    label="Edits (one is shown at a time; click Show to open it)",
+                                    label="Edits this version builds on (click Show to open one)",
                                 )  # fmt: skip
                                 gr.Markdown(
                                     "Change the scene itself from an instruction; the result "
