@@ -3,10 +3,17 @@
 Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now (no shared files). Task 2.3 and 4.2 wait until the redesign is merged: they edit `space/app.py` and the README, and need its Scene tab and tool sub-tabs.
 
 ## Status
-Plan only; nothing implemented. Start with 0.1 on a machine with `HF_TOKEN` and `SPLAT_STUDIO_DATASET` (in `.env`); the cloud session that wrote this plan had neither. Group 1 also needs a Modal token to deploy and test.
+0.1 done (baseline below). Group 1 needs a Modal token to deploy and test.
 
 ## 0. Baseline
-- [ ] 0.1 Run `python scripts/job_timings.py`; record cold start (`start_wait_s`) and stage times of recent object and preview jobs in this file
+- [x] 0.1 Run `python scripts/job_timings.py`; record cold start (`start_wait_s`) and stage times of recent object and preview jobs in this file
+  - 2026-11-15. The script read only `jobs/`, where scene jobs live; fixed to read `objects/` and `previews/`, and to include direct test runs (no `job.json`, so no start wait). All runs are from 2026-11-13, before any warm container work.
+  - Object, from the Space (`20261113-153134-71f6e0`, L40S, "put a plant onto the table"): start wait 11.7 s, run 124.1 s, click to finish 148.4 s. Stages: imports 50.9, load FLUX 20.4, image 3.7, load TRELLIS 23.3, gaussians 6.6, simplify 0.9, upload 17.4.
+  - Object, direct runs (L40S): `oak-tree-v2` run 131.4 s (load FLUX 22.3, image 3.6, load TRELLIS 22.3, gaussians 13.2, simplify 2.5). `oak-tree` 301.9 s, of which 154.4 s was the one-time FLUX download.
+  - Preview, from the Space (L4): both runs failed in gsplat (`AssertionError(torch.Size([1, 5]))`), so no full Space-side timing. The first had a start wait of 113.9 s (cold start); the second, 3 min later, 1.1 s, so the container was reused.
+  - Preview, direct runs (L4): `preview-test` run 154.7 s (render 118.0, load SDXL + ControlNet 16.0, restyle 14.1, upload 5.7, imports 3.3); `preview-test-a10g` (logged as L4) run 159.5 s (render 74.8, load 62.7, restyle 10.6, upload 9.2).
+  - Reading: in the object job, imports and model loading take about 95 of 124 s; the work itself (image, gaussians, simplify) is about 11 s and upload 17 s. A warm container should therefore land near 30 s, with upload the largest remaining stage. In the preview, `render` (75 to 118 s) dominates, not model loading: this is most likely the gsplat JIT compile that `speed-up-edit-jobs` task 1 removes. Warm containers alone will not bring the preview under 30 s.
+  - Overlap: `speed-up-edit-jobs` group 3 (on `main`) also turns preview and object jobs into warm Modal classes. Decide which change owns that work before starting group 1.
 
 ## 1. Load once per container
 - [ ] 1.1 Bump `modal>=1.0`; confirm `@modal.cls`, `@modal.enter`, `scaledown_window`, `max_containers` against the installed version
