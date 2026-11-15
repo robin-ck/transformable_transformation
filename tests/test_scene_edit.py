@@ -150,10 +150,14 @@ def test_split_ply_without_higher_order_terms() -> None:
 class FakeClient:
     def __init__(self) -> None:
         self.submitted: list[tuple] = []
+        self.budgets: list[dict | None] = []
         self.results: dict[str, object] = {}
 
-    def submit_edit(self, job_id, scene_id, number, camera, prompt, region=None, seed=0):
+    def submit_edit(
+        self, job_id, scene_id, number, camera, prompt, region=None, seed=0, budget=None
+    ):
         self.submitted.append((job_id, scene_id, number, prompt, region, seed))
+        self.budgets.append(budget)
         return f"fc-{job_id}"
 
     def poll(self, call_id: str):
@@ -172,6 +176,8 @@ def test_edit_job_records_params_and_finishes(tmp_path: Path) -> None:
                                  [0.1, 0.1, 0.5, 0.5], 4)]  # fmt: skip
     assert job.kind == "edit" and job.summary == "make the table green"
     assert job.params["version"] == 2 and job.params["model"].startswith("timbrooks/")
+    default = scene_edit.BUDGET_PRESETS[scene_edit.DEFAULT_PRESET]
+    assert job.params["budget"] == default and client.budgets == [default]
     assert (store.root / "edits" / job.job_id / "job.json").is_file()
     client.results[job.call_id] = {"status": "done", "scene_path": "scenes/s1/v3", "version": 3}
     done = mgr.refresh(job)
@@ -201,3 +207,46 @@ def test_prompt_log_lists_unfinished_edits_once() -> None:
 def test_viewer_has_region_mode() -> None:
     doc = viewer.viewer_document("/f.splat", viewer.Camera((0, -3, 1), (0, 0, 0)))
     assert '"region_mode"' in doc and "region:" in doc
+
+
+def test_edit_job_sends_full_budget_and_rejects_bad_values(tmp_path: Path) -> None:
+    store, client = jobs.LocalStore(tmp_path / "s"), FakeClient()
+    mgr = jobs.JobManager(store, client, lambda: 5.0, prefix="edits", timeout_s=1800)
+    cam = cam_at((0, -5, 1)).to_dict()
+    job = mgr.create_edit("x", "s1", 1, cam, budget={"steps": 800.0, "denoise_steps": 8})
+    assert client.budgets[-1] == {**scene_edit.BUDGET_PRESETS[scene_edit.DEFAULT_PRESET],
+                                  "steps": 800, "denoise_steps": 8}  # fmt: skip
+    assert job.params["budget"]["steps"] == 800
+    with pytest.raises(ValueError):
+        mgr.create_edit("x", "s1", 1, cam, budget={"steps": 10})
+    assert len(client.submitted) == 1
+
+
+# --- budget ---------------------------------------------------------------------------
+
+
+def test_budget_validation() -> None:
+    assert scene_edit.check_budget(None) == scene_edit.BUDGET_PRESETS["Balanced"]
+    assert scene_edit.check_budget({"n_views": 12})["n_views"] == 12
+    for bad in ({"n_views": 2}, {"steps": 1e6}, {"edit_every": 2.5}, {"denoise_steps": "10"},
+                {"denoise_steps": True}, {"guidance": 7}):  # fmt: skip
+        with pytest.raises(ValueError):
+            scene_edit.check_budget(bad)
+    for name, preset in scene_edit.BUDGET_PRESETS.items():
+        assert scene_edit.check_budget(preset) == preset
+        assert scene_edit.preset_of(preset) == name
+    assert scene_edit.preset_of({"steps": 1234}) is None
+
+
+def test_budget_estimate_orders_presets_and_matches_baseline() -> None:
+    est = {n: scene_edit.estimate_edit_seconds(p) for n, p in scene_edit.BUDGET_PRESETS.items()}
+    assert est["Fast"] < est["Balanced"] < est["Best"]
+    assert est["Balanced"] <= 4 * 60  # the target in speed-up-edit-jobs
+    # Today's settings, cold and uncached, minus the gsplat compile (about 80 s), should
+    # land near the measured 7.5 to 8 min of the first edits.
+    best = scene_edit.BUDGET_PRESETS["Best"]
+    cold = scene_edit.estimate_edit_seconds(best, warm=False, cached=False)
+    assert 6 * 60 <= cold + 80 <= 9 * 60
+    assert scene_edit.estimate_edit_seconds(best, cached=False) == pytest.approx(
+        est["Best"] + scene_edit.DOWNLOAD_S
+    )

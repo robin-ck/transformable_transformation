@@ -21,7 +21,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
-from splat_studio.editing.scene_edit import RegionError, region_from_viewer  # noqa: E402
+from splat_studio.editing.scene_edit import (  # noqa: E402
+    BUDGET_LIMITS,
+    BUDGET_PRESETS,
+    COLD_S,
+    DEFAULT_PRESET,
+    DOWNLOAD_S,
+    RegionError,
+    estimate_edit_breakdown,
+    preset_of,
+    region_from_viewer,
+)
 from splat_studio.space import prompt_log  # noqa: E402
 from splat_studio.space.add_object import (  # noqa: E402
     EDIT_COLUMNS,
@@ -693,7 +703,73 @@ REGION_JS = """(on) => {
 }"""
 
 
-def on_edit(camera_json, scene_id, prompt, region_on, seed, number, placing):
+BUDGET_KEYS = list(BUDGET_LIMITS)  # n_views, steps, edit_every, denoise_steps
+BUDGET_HINTS = {
+    "n_views": (
+        "Views around the camera that are edited first. More views keep the edit "
+        "consistent further around the scene; each costs about one image edit."
+    ),
+    "steps": (
+        "Training steps on the edited views. More steps follow the edits more closely; "
+        "about 5 s per 100 steps, plus the re-edits they bring."
+    ),
+    "edit_every": (
+        "One view is re-edited every this many steps. Lower re-edits more often: "
+        "views agree better, but this is the largest share of the time."
+    ),
+    "denoise_steps": (
+        "Image-editor steps per edit. Fewer is faster and a bit rougher; "
+        "every edit (first and re-edits) costs about 0.06 s per step."
+    ),
+}
+CUSTOM = "Custom"
+
+
+def _minutes(seconds: float) -> str:
+    m, s = divmod(int(round(seconds / 10) * 10), 60)
+    return (f"{m} min {s:02d} s" if s else f"{m} min") if m else f"{s} s"
+
+
+def edit_estimate(n_views, steps, edit_every, denoise_steps) -> str:
+    """Markdown: rough job time for these settings, with the parts that make it up."""
+    budget = dict(zip(BUDGET_KEYS, (n_views, steps, edit_every, denoise_steps), strict=True))
+    try:
+        parts = estimate_edit_breakdown(budget)
+    except ValueError as e:
+        return f"⚠️ {e}"
+    names = {"first_edits": "first edits", "training": "training",
+             "re_edits": "re-edits", "saving": "loading and saving"}  # fmt: skip
+    detail = ", ".join(f"{names[k]} {_minutes(v)}" for k, v in parts.items())
+    return (
+        f"⏱️ About **{_minutes(sum(parts.values()))}** on the GPU ({detail}). "
+        f"Add about {int(COLD_S)} s if no edit ran in the last 5 minutes, and "
+        f"{int(DOWNLOAD_S)} s for a version the GPU has not loaded before. Rough times "
+        "for the 1.5 M Gaussian test scene; larger scenes take longer."
+    )
+
+
+def on_budget_preset(name):
+    """Preset picked: set the sliders to it and update the estimate."""
+    if name not in BUDGET_PRESETS:
+        return [gr.skip()] * len(BUDGET_KEYS) + [gr.skip()]
+    values = [BUDGET_PRESETS[name][k] for k in BUDGET_KEYS]
+    return [*values, edit_estimate(*values)]
+
+
+def on_budget_slider(*values):
+    """A slider moved: show the matching preset (or Custom) and update the estimate."""
+    budget = dict(zip(BUDGET_KEYS, values, strict=True))
+    try:
+        name = preset_of(budget) or CUSTOM
+    except ValueError:
+        name = CUSTOM
+    return name, edit_estimate(*values)
+
+
+def on_edit(
+    camera_json, scene_id, prompt, region_on, seed, number, placing,
+    n_views, steps, edit_every, denoise_steps,
+):  # fmt: skip
     version = _version(scene_id, number)
     if version is None:
         raise gr.Error("Pick a finished scene first.")
@@ -709,29 +785,41 @@ def on_edit(camera_json, scene_id, prompt, region_on, seed, number, placing):
         raise gr.Error(str(e)) from e
     if region_on and region is None:
         raise gr.Error("Drag a box in the viewer first, or switch off 'Limit to a region'.")
-    job = EDITS.create_edit(
-        prompt,
-        scene_id,
-        version.number,
-        camera.to_dict(),
-        region=region.to_list() if region else None,
-        seed=int(seed or 0),
-    )
+    budget = dict(zip(BUDGET_KEYS, (n_views, steps, edit_every, denoise_steps), strict=True))
+    try:
+        job = EDITS.create_edit(
+            prompt,
+            scene_id,
+            version.number,
+            camera.to_dict(),
+            region=region.to_list() if region else None,
+            seed=int(seed or 0),
+            budget=budget,
+        )
+    except ValueError as e:
+        raise gr.Error(str(e)) from e
     if job.status == "failed":
         return f"**Could not start.** {job.error['message']}", None
     where = "inside the marked box" if region else "around this view"
+    took = _minutes(sum(estimate_edit_breakdown(job.params["budget"]).values()))
     return (
-        f"⚙️ Editing v{version.number} {where} (job {job.job_id}). This takes about "
-        "10 minutes; the result is saved as a new version even if you close the page.",
+        f"⚙️ Editing v{version.number} {where} (job {job.job_id}). This takes about {took} "
+        "on the GPU, plus any wait for one; the result is saved as a new version even if "
+        "you close the page.",
         job.job_id,
     )
 
 
+# The last stage in the run log -> what the job does now. The first three are load stages
+# of a fresh container (`SceneEditor.load`); a warm container skips them.
 EDIT_STAGES = {
+    "imports": "loading the image editor",
+    "warm_gsplat": "loading the image editor",
+    "load_editor": "loading the scene",
     "download_scene": "loading the scene",
     "load_scene": "rendering views",
-    "render_views": "loading the image editor",
-    "load_editor": "editing the views",
+    "render_views": "editing the views",
+    "encode_prompt": "editing the views",
     "first_edits": "training on the edited views",
     "train": "saving",
 }
@@ -1015,6 +1103,33 @@ def build() -> gr.Blocks:
                                     label="Limit to a region (drag a box in the viewer)",
                                     value=False,
                                 )
+                                ed_preset = gr.Radio(
+                                    [*BUDGET_PRESETS, CUSTOM],
+                                    value=DEFAULT_PRESET,
+                                    label="Speed and quality",
+                                    info="Fast and Balanced are not yet checked against Best "
+                                    "for quality; compare on your scene.",
+                                )
+                                default = BUDGET_PRESETS[DEFAULT_PRESET]
+                                with gr.Accordion("Edit settings", open=False):
+                                    ed_budget = [
+                                        gr.Slider(
+                                            *BUDGET_LIMITS[k],
+                                            value=default[k],
+                                            step=1,
+                                            label=label,
+                                            info=BUDGET_HINTS[k],
+                                        )
+                                        for k, label in [
+                                            ("n_views", "Views"),
+                                            ("steps", "Training steps"),
+                                            ("edit_every", "Re-edit every … steps"),
+                                            ("denoise_steps", "Editor steps per edit"),
+                                        ]
+                                    ]
+                                ed_estimate = gr.Markdown(
+                                    edit_estimate(*(default[k] for k in BUDGET_KEYS))
+                                )
                                 with gr.Row():
                                     ed_seed = gr.Number(label="Seed", value=0, precision=0)
                                     ed_go = gr.Button("Edit scene", variant="primary")
@@ -1132,11 +1247,15 @@ def build() -> gr.Blocks:
         ed_region.input(None, ed_region, ed_region, js=REGION_JS)
         # A new viewer page starts without the box overlay, so switch the region off.
         viewer.change(lambda: False, None, ed_region)
+        quick = {"queue": False, "show_progress": "hidden"}
+        ed_preset.input(on_budget_preset, ed_preset, [*ed_budget, ed_estimate], **quick)
+        for slider in ed_budget:
+            slider.input(on_budget_slider, ed_budget, [ed_preset, ed_estimate], **quick)
         clicked(
             ed_go,
             "⏳ Starting…",
             on_edit,
-            [camera_json, picker, ed_prompt, ed_region, ed_seed, version, placing],
+            [camera_json, picker, ed_prompt, ed_region, ed_seed, version, placing, *ed_budget],
             [ed_status, edit_job],
             js=GET_CAMERA_JS,
         )
