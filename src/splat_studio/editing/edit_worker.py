@@ -50,6 +50,11 @@ class EditSettings:
     seed: int = 0
 
 
+def settings_for(budget: dict | None, seed: int = 0) -> EditSettings:
+    """`EditSettings` from a user budget (see `scene_edit.check_budget`) and a seed."""
+    return EditSettings(**scene_edit.check_budget(budget), seed=seed)
+
+
 @dataclass
 class EditResult:
     ply: Path
@@ -100,9 +105,13 @@ class Splats:
 
 
 class Editor:
-    """InstructPix2Pix with Instruct-NeRF2NeRF's partial re-noising of the current render."""
+    """InstructPix2Pix with Instruct-NeRF2NeRF's partial re-noising of the current render.
 
-    def __init__(self, repo_id: str, revision: str, prompt: str, settings: EditSettings) -> None:
+    Loading the pipeline does not depend on the prompt, so a warm container loads it once
+    (`Editor(repo_id, revision)`) and each job sets its own prompt and settings with `use`.
+    """
+
+    def __init__(self, repo_id: str, revision: str) -> None:
         from diffusers import DDIMScheduler, StableDiffusionInstructPix2PixPipeline
 
         pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
@@ -115,21 +124,27 @@ class Editor:
             requires_safety_checker=False,
         ).to("cuda")
         pipe.set_progress_bar_config(disable=True)
+        self.pipe = pipe
         self.unet, self.vae = pipe.unet, pipe.vae
         self.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+        self.sf = self.vae.config.scaling_factor
+        self.s = EditSettings()
+        self.embeds = None
+
+    @torch.no_grad()
+    def _encode_text(self, text: str) -> torch.Tensor:
+        tok = self.pipe.tokenizer
+        ids = tok(text, padding="max_length", max_length=tok.model_max_length,
+                  truncation=True, return_tensors="pt").input_ids.to("cuda")  # fmt: skip
+        return self.pipe.text_encoder(ids)[0]
+
+    def use(self, prompt: str, settings: EditSettings) -> Editor:
+        """Set the prompt and settings for the next calls (one job)."""
         self.s = settings
-        tok = pipe.tokenizer
-
-        def encode_text(text: str) -> torch.Tensor:
-            ids = tok(text, padding="max_length", max_length=tok.model_max_length,
-                      truncation=True, return_tensors="pt").input_ids.to("cuda")  # fmt: skip
-            return pipe.text_encoder(ids)[0]
-
-        with torch.no_grad():
-            text, empty = encode_text(prompt), encode_text("")
+        text, empty = self._encode_text(prompt), self._encode_text("")
         # Order as in the IP2P pipeline: (text + image), (image only), (neither).
         self.embeds = torch.cat([text, empty, empty])
-        self.sf = self.vae.config.scaling_factor
+        return self
 
     @torch.no_grad()
     def __call__(
@@ -210,8 +225,12 @@ def run_edit(
     region: scene_edit.Region | None = None,
     settings: EditSettings | None = None,
     on_stage: Callable[[str, float], None] | None = None,
+    editor: Editor | None = None,
 ) -> EditResult:
-    """Edit the scene in `ply_path` around the `anchor` view; writes results to `out_dir`."""
+    """Edit the scene in `ply_path` around the `anchor` view; writes results to `out_dir`.
+
+    Pass a loaded `editor` (a warm container's) to skip loading InstructPix2Pix.
+    """
     from splat_studio.reconstruction import errors
 
     s = settings or EditSettings()
@@ -259,8 +278,11 @@ def run_edit(
             masks = [_region_mask(splats, c, selected) for c in cams]
     stage("render_views")
 
-    editor = Editor(*model, prompt, s)
-    stage("load_editor")
+    if editor is None:
+        editor = Editor(*model)
+        stage("load_editor")
+    editor.use(prompt, s)
+    stage("encode_prompt")
 
     def target_for(i: int, current: torch.Tensor, noise: float) -> torch.Tensor:
         edited = editor(current, originals[i], noise, gen)
@@ -333,6 +355,8 @@ def run_edit(
         stats={
             "views": len(cams),
             "steps": s.steps,
+            "edit_every": s.edit_every,
+            "denoise_steps": s.denoise_steps,
             "re_edits": edits,
             "pivot_distance": round(distance, 3),
             "mask_coverage": round(float(masks[0].mean()), 3) if masks else None,
