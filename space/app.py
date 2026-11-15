@@ -428,7 +428,12 @@ def on_generate(
         raise gr.Error("Describe the object, e.g. 'a mature oak tree', or upload a photo of it.")
     job = OBJECTS.create_object(prompt, scene_id=scene_id, seed=int(seed or 0), image=reference)
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None, False, gr.update(visible=False)
+        return (
+            f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}",
+            None,
+            False,
+            gr.update(visible=False),
+        )
     return (
         f"⚙️ Generating **{job.summary}** (job {job.job_id}); this takes a few minutes.",
         job.job_id,
@@ -575,7 +580,7 @@ def on_edit(camera_json, scene_id, number, prompt, region_on, seed, placing):
         seed=int(seed or 0),
     )
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     where = "inside the marked box" if region else "around this view"
     return (
         f"⚙️ Editing v{version.number} {where} (job {job.job_id}). This takes about "
@@ -668,7 +673,7 @@ def on_preview(camera_json, scene_id, number, prompt, strength, seed, placing):
         prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
     )
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     note = " The object being placed is not part of it." if placing else ""
     return (
         f"⚙️ Rendering this view of v{version.number} and restyling it (job {job.job_id}).{note}",
@@ -740,7 +745,7 @@ def on_image(mode, prompt, source, aspect, strength, seed):
         kwargs["aspect"] = images.aspect_of(aspect)
     job = IMAGES.create_image(prompt, **kwargs)
     if job.status == "failed":
-        return f"**Could not start.** {job.error['message']}", None
+        return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
     what = "Changing your image" if with_image else "Making the image"
     return f"⚙️ {what} (job {job.job_id}).", job.job_id
 
@@ -823,7 +828,10 @@ def on_create(files: list[str] | None):
         return f"**Upload rejected.** {e}", jobs_table()
     job = JOBS.create(upload)
     if job.status == "failed":
-        return f"**Could not start the job.** {job.error['message']}", jobs_table()
+        return (
+            f"**Could not start the job.** {job.error['message']} {job.error.get('tip', '')}",
+            jobs_table(),
+        )
     return f"**Job {job.job_id} started.** It appears in the list below.", jobs_table()
 
 
