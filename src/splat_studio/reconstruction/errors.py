@@ -100,6 +100,14 @@ def preview_failed(detail: str) -> ReconstructionError:
     )
 
 
+def preview_empty() -> ReconstructionError:
+    return ReconstructionError(
+        "preview_empty",
+        "The current view shows almost nothing of the scene.",
+        "Tip: turn the camera towards the scene (or press Reset view) and try again.",
+    )
+
+
 def edit_failed(detail: str) -> ReconstructionError:
     return ReconstructionError(
         "edit_failed",
@@ -108,16 +116,19 @@ def edit_failed(detail: str) -> ReconstructionError:
     )
 
 
-def edit_region(message: str) -> ReconstructionError:
-    """The marked region cannot be edited (e.g. it holds no Gaussians)."""
-    return ReconstructionError("edit_region", message, "")
-
-
-def preview_empty() -> ReconstructionError:
+def edit_empty() -> ReconstructionError:
     return ReconstructionError(
-        "preview_empty",
-        "The current view shows almost nothing of the scene.",
-        "Tip: turn the camera towards the scene (or press Reset view) and try again.",
+        "edit_empty",
+        "The current view shows almost nothing of the scene, so there is nothing to edit.",
+        "Tip: turn the camera towards the part you want to change (or press Reset view).",
+    )
+
+
+def region_empty() -> ReconstructionError:
+    return ReconstructionError(
+        "region_empty",
+        "The marked region holds almost no part of the scene.",
+        "Tip: drag the box over a visible surface, or edit without a region.",
     )
 
 

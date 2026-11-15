@@ -57,9 +57,29 @@ def _version_number(scene_path: str | None, scene_id: str) -> int | None:
     return int(tail) if tail.isdigit() else None
 
 
-def scene_log(scene_id: str, versions: list[Version], previews: list[Job]) -> list[LogEntry]:
-    """All prompts for one scene, newest first: its versions and the previews made from them."""
+def scene_log(
+    scene_id: str, versions: list[Version], previews: list[Job], edits: list[Job] = ()
+) -> list[LogEntry]:
+    """All prompts for one scene, newest first.
+
+    Versions (every edit that produced one), previews made from its versions, and edit
+    jobs that have not (yet) produced a version: running or failed ones. A finished edit
+    is listed once, as its version.
+    """
     entries = [LogEntry(v.created_at, v.mode, v.prompt, v.model, f"v{v.number}") for v in versions]
+    for job in edits:
+        if job.status == "done" or job.params.get("scene_id") != scene_id:
+            continue
+        entries.append(
+            LogEntry(
+                job.created_at,
+                "edit_scene",
+                job.params.get("prompt") or job.summary,
+                job.params.get("model"),
+                f"edit of v{job.params.get('version')} (job {job.job_id})",
+                job.status,
+            )
+        )
     for job in previews:
         n = _version_number(job.params.get("scene_path"), scene_id)
         if n is None:

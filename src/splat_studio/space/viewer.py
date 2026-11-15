@@ -15,11 +15,6 @@ the scene with its own position, turn and size. The page listens for
 `{type: "placement", x, y, z, turn, size}` messages from the Space and moves the
 object live, so dragging a slider does not reload the scene.
 
-Edit scene region (task 4.4): on `{type: "region_state", on, frac, center}` the page
-shows a wire sphere (radius `frac` x scene radius) and, while `on`, a click moves its
-centre; it then posts `{type: "region_changed", center, radius}`. On load it posts
-`{type: "viewer_ready"}` so the Space can send the current region state again.
-
 Preview (task 4.3): on `{type: "get_camera", id}` the page replies to the sender with
 `{type: "camera", id, matrix, fov, aspect, target}` (Three.js camera-to-world,
 column-major; `target` is the orbit centre), so the Modal job can render exactly the
@@ -33,6 +28,10 @@ paused while dragging. After a click or drag the page posts
 `{type: "placement_changed", x, y, z, turn, size}` to the Space, answers
 `{type: "get_placement", id}` with `{type: "placement", id, ...}`, and shows or hides
 the object on `{type: "object_visible", visible}`.
+
+Region (task 4.4): `{type: "region_mode", on}` shows an overlay where dragging draws
+a box (as fractions of the view, top left 0,0) instead of moving the camera; the
+camera reply then carries `region: [x0, y0, x1, y1]` (or null).
 """
 
 from __future__ import annotations
@@ -104,15 +103,6 @@ def floor_height(positions: np.ndarray) -> float:
     return round(float(np.percentile(z, 5)), 3) if len(z) else 0.0
 
 
-def scene_radius(positions: np.ndarray) -> float:
-    """80th-percentile distance from the median centre (as `camera_for`), at least 1e-3."""
-    finite = positions[np.isfinite(positions).all(axis=1)] if len(positions) else positions
-    if len(finite) == 0:
-        return 1.0
-    centre = np.median(finite, axis=0)
-    return round(max(float(np.percentile(np.linalg.norm(finite - centre, axis=1), 80)), 1e-3), 4)
-
-
 def _vec(v: np.ndarray) -> tuple[float, float, float]:
     x, y, z = (round(float(c), 4) for c in v)
     return (x, y, z)
@@ -149,14 +139,13 @@ def viewer_document(
     camera: Camera,
     obj: dict | None = None,
     floor: float = 0.0,
-    scene_radius: float = 1.0,
 ) -> str:
     """Self-contained HTML page that shows one `.splat` scene.
 
     `obj` adds a movable object: {"url": ..., "position": [...], "quaternion": [x, y, z, w],
     "scale": [...], "turn": degrees, "visible": bool} (see
     `editing.objects.Placement.to_viewer`). Clicks that hit no splat land on the plane
-    at height `floor`; the Edit scene region is sized in shares of `scene_radius`.
+    at height `floor`.
     """
     config = json.dumps(
         {
@@ -166,7 +155,6 @@ def viewer_document(
             "up": camera.up,
             "object": obj,
             "floor": floor,
-            "sceneRadius": scene_radius,
         }
     ).replace("</", "<\\/")
     return (
@@ -182,10 +170,9 @@ def viewer_iframe(
     height: int = 560,
     obj: dict | None = None,
     floor: float = 0.0,
-    scene_radius: float = 1.0,
 ) -> str:
     """The viewer as an iframe for a `gr.HTML` block."""
-    doc = html.escape(viewer_document(scene_url, camera, obj, floor, scene_radius), quote=True)
+    doc = html.escape(viewer_document(scene_url, camera, obj, floor), quote=True)
     return (
         f'<iframe class="splat-viewer" title="3D scene viewer" srcdoc="{doc}" '
         f'style="width:100%;height:{int(height)}px;border:0;border-radius:8px;" '
@@ -218,6 +205,13 @@ _PAGE = """<!doctype html>
     font-size: 12px; pointer-events: none; }
   #placehelp { position: absolute; left: 10px; top: 10px; z-index: 10; display: none;
     font-size: 12px; background: rgba(20,24,32,.8); padding: 4px 8px; border-radius: 6px; }
+  #area { position: absolute; inset: 0; z-index: 8; display: none; cursor: crosshair;
+    touch-action: none; }
+  #area .hint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+    background: rgba(20,24,32,.85); border: 1px solid #4a5263; border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; pointer-events: none; }
+  #box { position: absolute; border: 2px dashed #ffb347; background: rgba(255,179,71,.15);
+    display: none; pointer-events: none; }
   #msg { position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; text-align: center; padding: 16px; z-index: 5; }
 </style>
@@ -225,6 +219,7 @@ _PAGE = """<!doctype html>
 </head><body>
 <div id="root"></div>
 <div id="msg">Loading scene…</div>
+<div id="area"><div class="hint">Drag a box over the part to edit</div><div id="box"></div></div>
 <div id="bar"><button id="reset" title="Reset view (R)">Reset view</button></div>
 <div id="help">Drag: orbit · Right-drag / two fingers: pan · Wheel / pinch: zoom · R: reset</div>
 <div id="placehelp"></div>
@@ -320,7 +315,7 @@ function setupPlacement(THREE, viewer, o) {
     return r.clone().applyMatrix4(inverse).intersectsBox(box);
   };
 
-  // Click: put the object's base on the clicked point (first in line, before a region).
+  // Click: put the object's base on the clicked point.
   clickHandlers.unshift((mouse) => {
     const point = scenePoint(THREE, viewer, mouse, obj);
     if (point) { p.x = point.x; p.y = point.y; p.z = point.z; apply(); tell(); }
@@ -370,56 +365,6 @@ function setupPlacement(THREE, viewer, o) {
   tip.style.display = "block";
 }
 
-// Region for Edit scene (task 4.4): while region mode is on, a click marks the centre of
-// a sphere whose radius is a share (`frac`) of the scene radius. The Space keeps the
-// state and sends it again after a reload (`viewer_ready` -> `region_state`).
-function setupRegion(THREE, viewer) {
-  const state = { on: false, frac: 0.2, center: null };
-  let mesh = null;
-  const radius = () => state.frac * cfg.sceneRadius;
-  const draw = () => {
-    const show = state.on && state.center;
-    if (show && !mesh) {
-      mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), new THREE.MeshBasicMaterial(
-        { color: 0xffb020, wireframe: true, transparent: true, opacity: 0.6 }));
-      viewer.threeScene.add(mesh);
-    }
-    if (mesh) {
-      mesh.visible = !!show;
-      if (show) { mesh.position.set(...state.center); mesh.scale.setScalar(radius()); }
-    }
-    if (state.on && !cfg.object) {
-      tip.textContent = state.center ? "Region marked · click again to move it"
-                                     : "Click the scene to mark the region to edit";
-      tip.style.display = "block";
-    } else if (!cfg.object) {
-      tip.style.display = "none";
-    }
-  };
-  const tell = () => {
-    if (!state.center) return;
-    window.parent.postMessage({ type: "region_changed", center: state.center,
-      radius: Math.round(radius() * 10000) / 10000 }, "*");
-  };
-  window.addEventListener("message", (e) => {
-    const d = e.data;
-    if (!d || d.type !== "region_state") return;
-    state.on = !!d.on;
-    state.frac = Number(d.frac) > 0 ? Number(d.frac) : state.frac;
-    state.center = Array.isArray(d.center) ? d.center.map(Number) : null;
-    draw();
-    if (state.on) tell();
-  });
-  clickHandlers.push((mouse) => {
-    if (!state.on) return false;
-    const p = scenePoint(THREE, viewer, mouse, cfg.object ? viewer.getSplatScene(1) : null);
-    if (p) { state.center = [p.x, p.y, p.z].map((v) => Math.round(v * 1000) / 1000); }
-    draw(); tell();
-    return true;
-  });
-  window.parent.postMessage({ type: "viewer_ready" }, "*");
-}
-
 try {
   const GS = await import("__VIEWER__");
   const THREE = await import("three");
@@ -445,14 +390,46 @@ try {
   };
   document.getElementById("reset").addEventListener("click", reset);
   window.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R") reset(); });
-  // Preview (task 4.3): the Space asks for the current camera to render the same view.
+  // Region (task 4.4): while on, dragging draws a box instead of moving the camera.
+  const area = document.getElementById("area"), box = document.getElementById("box");
+  let region = null, start = null;
+  const frac = (e) => {
+    const r = area.getBoundingClientRect();
+    return [Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
+            Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)];
+  };
+  const drawBox = (r) => {
+    if (!r) { box.style.display = "none"; return; }
+    Object.assign(box.style, { display: "block", left: r[0] * 100 + "%", top: r[1] * 100 + "%",
+      width: (r[2] - r[0]) * 100 + "%", height: (r[3] - r[1]) * 100 + "%" });
+  };
+  area.addEventListener("pointerdown", (e) => {
+    start = frac(e); area.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  area.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    const [x, y] = frac(e);
+    region = [Math.min(start[0], x), Math.min(start[1], y),
+              Math.max(start[0], x), Math.max(start[1], y)];
+    drawBox(region);
+  });
+  area.addEventListener("pointerup", () => { start = null; });
+  // Preview (4.3) and edit (4.4): the Space asks for the current camera (and box); the
+  // orbit target lets a reloaded viewer start at the same view.
   window.addEventListener("message", (e) => {
     const d = e.data, c = viewer.camera;
-    if (!d || d.type !== "get_camera" || !c || !e.source) return;
+    if (!d) return;
+    if (d.type === "region_mode") {
+      area.style.display = d.on ? "block" : "none";
+      if (!d.on) { region = null; drawBox(null); }
+      return;
+    }
+    if (d.type !== "get_camera" || !c || !e.source) return;
     c.updateMatrixWorld();
     const t = viewer.controls ? viewer.controls.target : null;
     e.source.postMessage({ type: "camera", id: d.id, matrix: Array.from(c.matrixWorld.elements),
-      fov: c.fov, aspect: c.aspect, target: t ? [t.x, t.y, t.z] : null }, "*");
+      fov: c.fov, aspect: c.aspect, target: t ? [t.x, t.y, t.z] : null,
+      region: area.style.display === "block" ? region : null }, "*");
   });
   if (cfg.object) {
     const o = cfg.object;
@@ -472,7 +449,6 @@ try {
     for (const handle of clickHandlers) { if (handle(mouse)) return; }
     ownClick(mouse);
   };
-  setupRegion(THREE, viewer);
   viewer.start();
   window.splatViewerReady = true;
 } catch (err) {
@@ -524,6 +500,4 @@ def scene_html(
         obj = {"url": file_url(obj_splat), **(placement or {})}
     positions = splat_positions(splat)
     camera = camera or camera_for(positions)
-    return viewer_iframe(
-        file_url(splat), camera, height, obj, floor_height(positions), scene_radius(positions)
-    )
+    return viewer_iframe(file_url(splat), camera, height, obj, floor_height(positions))
