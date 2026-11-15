@@ -9,14 +9,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-
 from splat_studio.editing.objects import Placement, default_placement, merge_files
 from splat_studio.reconstruction.export import ply_vertex_count
 
 from .jobs import Job, Store
 from .versions import Version, add_version
-from .viewer import splat_positions
+from .viewer import floor_height, splat_positions
 
 
 class PlaceError(Exception):
@@ -32,16 +30,6 @@ class SliderRanges:
     z: tuple[float, float]
     size: tuple[float, float]
     floor: float = 0.0  # height of the scene floor; clicks off the splats land on it
-
-
-def floor_height(positions: np.ndarray) -> float:
-    """Height (z) of the scene floor: the 5th percentile of Gaussian heights.
-
-    A low percentile rather than the minimum, so floaters below the ground are ignored.
-    """
-    z = positions[:, 2] if len(positions) else positions.reshape(0)
-    z = z[np.isfinite(z)]
-    return round(float(np.percentile(z, 5)), 3) if len(z) else 0.0
 
 
 def start_placement(store: Store, version: Version) -> tuple[Placement, SliderRanges]:

@@ -92,6 +92,26 @@
     SPLAT_STUDIO_DATASET. open: not yet tried from the Space against HF Hub.
 - [ ] 4.3 Preview: render view, image-to-image with depth control
 - [ ] 4.4 Edit scene: Modal job with iterative dataset update; optional region mask
+  - 2026-11-15: built, not yet run on Modal (stays open until a real edit works).
+  - `editing/scene_edit.py` (numpy, unit-tested): region sphere, 36 virtual orbit views around
+    the scene or region (no stored training cameras; see design.md), noise strength per round,
+    InstructPix2Pix guidance, and writing the fine-tuned values back (only inside the region,
+    `f_rest_*` cleared there).
+  - `editing/scene_edit_gpu.py` (Modal only): renders the views with gsplat (SH degree 0),
+    edits each with InstructPix2Pix started from the noised current render and conditioned on
+    the original render (Instruct-NeRF2NeRF), then fine-tunes; 3 rounds x 600 steps, 512 px.
+    Checked on CPU with a tiny random InstructPix2Pix (diffusers 0.31.0, as on Modal) and a
+    stand-in renderer: the loop runs, edits are deterministic per seed, Gaussians outside the
+    region stay byte-identical. The gsplat call was checked against the 1.5.3 source only.
+  - Modal `edit_scene` (A10G, 40 min cap) writes `edits/<job>/scene.ply`, `scene.splat` and
+    before/edited/after images of one view. The Space stores the result as a new version
+    (`space/edit_scene.py`, mode `edit_scene`, parent, prompt, model, seed, region); the job
+    records the version, so it is stored once. Edited versions have no `objects` list.
+  - Space: Edit scene sub-tab (instruction, seed, "Limit to a region" with size slider; the
+    region is marked by clicking the viewer and shown as a wire sphere). The new version opens
+    by itself if its scene is shown and no object is being placed.
+  - open: first real run (`modal deploy modal_app/app.py`, then an edit from the Space);
+    time and cost per edit; whether 36 views x 3 rounds is enough or too much.
 - [x] 4.5 Prompt log per version
   - `splat_studio/space/prompt_log.py` reads what is already stored: each version's
     `version.json` (prompt, mode, model, parent, date) and each preview's `job.json`.

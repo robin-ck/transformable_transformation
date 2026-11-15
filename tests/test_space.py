@@ -437,3 +437,21 @@ def test_object_job_errors_use_object_wording(tmp_path: Path) -> None:
     slow = mgr.create_object("lamp")
     client.results[slow.call_id] = type("FunctionTimeoutError", (Exception,), {})()
     assert "15 minutes" in mgr.refresh(slow).error["message"]
+
+
+def test_viewer_script_is_valid_javascript(tmp_path: Path) -> None:
+    """The page script is assembled from Python strings; a stray edit breaks the viewer."""
+    import re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    obj = {"url": "o", "position": [0, 0, 0], "quaternion": [0, 0, 0, 1], "scale": [1] * 3}
+    for o in (None, obj):
+        page = viewer.viewer_document("u", viewer.Camera((0, 0, 1), (0, 0, 0)), o)
+        script = re.search(r'<script type="module">(.*?)</script>', page, re.S).group(1)
+        (tmp_path / "viewer.mjs").write_text(script)
+        res = subprocess.run([node, "--check", str(tmp_path / "viewer.mjs")], capture_output=True)
+        assert res.returncode == 0, res.stderr.decode()[-500:]

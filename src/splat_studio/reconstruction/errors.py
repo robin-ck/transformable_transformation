@@ -100,6 +100,19 @@ def preview_failed(detail: str) -> ReconstructionError:
     )
 
 
+def edit_failed(detail: str) -> ReconstructionError:
+    return ReconstructionError(
+        "edit_failed",
+        "Editing the scene failed on the GPU. Please try again, or reword the instruction.",
+        f"Technical detail: {detail[-300:]}" if detail else "",
+    )
+
+
+def edit_region(message: str) -> ReconstructionError:
+    """The marked region cannot be edited (e.g. it holds no Gaussians)."""
+    return ReconstructionError("edit_region", message, "")
+
+
 def preview_empty() -> ReconstructionError:
     return ReconstructionError(
         "preview_empty",

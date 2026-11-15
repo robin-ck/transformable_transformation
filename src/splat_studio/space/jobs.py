@@ -30,6 +30,7 @@ FINAL = {"done", "failed"}
 TRAIN_TIMEOUT_S = 60 * 60  # keep in sync with modal_app/app.py
 OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
+EDIT_TIMEOUT_S = 40 * 60  # keep in sync with modal_app/app.py
 
 
 class Store(Protocol):
@@ -245,6 +246,37 @@ class JobManager:
             ),
         )
 
+    def create_edit(
+        self,
+        prompt: str,
+        scene_path: str,
+        scene_id: str,
+        version: int,
+        region: dict | None = None,
+        seed: int = 0,
+    ) -> Job:
+        """Record an Edit scene job (task 4.4) and start it on Modal.
+
+        The Modal job writes `edits/<job>/scene.ply` and `scene.splat`; the Space turns
+        them into a new version when it sees the job done (`space/edit_scene.py`).
+        """
+        now = self.clock()
+        job = Job(new_job_id(now), "edit", " ".join(prompt.split())[:80], now)
+        job.params = {"prompt": prompt, "seed": seed, "region": region, "scene_id": scene_id,
+                      "version": version, "scene_path": scene_path,
+                      "model": models.IMAGE_EDIT.label}  # fmt: skip
+        self._save(job)
+        return self._start(
+            job,
+            lambda: self.client.submit_edit(
+                job.job_id, scene_path, prompt, region=region, seed=seed
+            ),
+        )
+
+    def save(self, job: Job) -> Job:
+        """Store a job after the Space changed it (e.g. noted the version it made)."""
+        return self._save(job)
+
     def get(self, job_id: str) -> Job | None:
         data = self.store.read_json(f"{self.prefix}/{job_id}/job.json")
         return Job.from_dict(data) if data else None
@@ -265,9 +297,11 @@ class JobManager:
             state, result = self.client.poll(job.call_id) if job.call_id else ("running", None)
         except Exception as e:
             run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
-            failed = {"object": errors.object_failed, "preview": errors.preview_failed}.get(
-                job.kind, errors.training_failed
-            )
+            failed = {
+                "object": errors.object_failed,
+                "preview": errors.preview_failed,
+                "edit": errors.edit_failed,
+            }.get(job.kind, errors.training_failed)
             if run and run.get("status") in FINAL:
                 self._apply_result(job, run)
             elif type(e).__name__ == "FunctionTimeoutError":

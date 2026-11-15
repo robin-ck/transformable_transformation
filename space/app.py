@@ -21,9 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
-from splat_studio.space import prompt_log  # noqa: E402
+from splat_studio.editing.scene_edit import EditError  # noqa: E402
+from splat_studio.space import edit_scene, prompt_log  # noqa: E402
 from splat_studio.space.add_object import PlaceError, place_object, start_placement  # noqa: E402
 from splat_studio.space.jobs import (  # noqa: E402
+    EDIT_TIMEOUT_S,
     OBJECT_TIMEOUT_S,
     PREVIEW_TIMEOUT_S,
     HubStore,
@@ -64,6 +66,7 @@ STORE = HubStore(DATASET, os.environ.get("HF_TOKEN")) if DATASET else LocalStore
 JOBS = JobManager(STORE)
 OBJECTS = JobManager(STORE, prefix="objects", timeout_s=OBJECT_TIMEOUT_S)
 PREVIEWS = JobManager(STORE, prefix="previews", timeout_s=PREVIEW_TIMEOUT_S)
+EDITS = JobManager(STORE, prefix="edits", timeout_s=EDIT_TIMEOUT_S)
 STATUS_LABEL = {
     "queued": "⏳ queued",
     "running": "⚙️ running",
@@ -346,14 +349,27 @@ PLACE_JS = """async (...args) => {
 
 # Page-level listener: the viewer posts `placement_changed` after a click or drag; the
 # values are written into a hidden textbox whose change event updates the sliders.
+# The page also keeps the Edit scene region (window.splatRegion), so a reloaded viewer gets
+# it back: the viewer posts `viewer_ready`, the page answers with `region_state`.
 BRIDGE_HEAD = """<script>
+window.splatRegion = {on: false, frac: 0.2, center: null};
+const splatBridge = (id, data) => {
+  const box = document.querySelector(`#${id} textarea, #${id} input`);
+  if (!box) return;
+  box.value = JSON.stringify({...data, t: Date.now()});
+  box.dispatchEvent(new Event("input", {bubbles: true}));
+};
 window.addEventListener("message", (e) => {
   const d = e.data;
-  if (!d || d.type !== "placement_changed") return;
-  const box = document.querySelector("#placement-bridge textarea, #placement-bridge input");
-  if (!box) return;
-  box.value = JSON.stringify({x: d.x, y: d.y, z: d.z, turn: d.turn, size: d.size, t: Date.now()});
-  box.dispatchEvent(new Event("input", {bubbles: true}));
+  if (!d) return;
+  if (d.type === "placement_changed") {
+    splatBridge("placement-bridge", {x: d.x, y: d.y, z: d.z, turn: d.turn, size: d.size});
+  } else if (d.type === "region_changed") {
+    window.splatRegion.center = d.center;
+    splatBridge("region-bridge", {center: d.center, radius: d.radius});
+  } else if (d.type === "viewer_ready" && e.source) {
+    e.source.postMessage({type: "region_state", ...window.splatRegion}, "*");
+  }
 });
 </script>"""
 
@@ -479,6 +495,107 @@ def on_cancel(camera_json, scene_id, number, hidden):
     )
 
 
+# --- edit scene (task 4.4) -----------------------------------------------------------
+
+# Region mode on/off and size go to the page state and the viewer. Turning it off forgets
+# the marked centre. Inputs: region_on, region_frac.
+REGION_JS = """(on, frac) => {
+  const R = window.splatRegion || (window.splatRegion = {on: false, frac: 0.2, center: null});
+  R.on = !!on; R.frac = Number(frac) || R.frac;
+  if (!R.on) R.center = null;
+  const f = document.querySelector("iframe.splat-viewer");
+  if (f && f.contentWindow) f.contentWindow.postMessage({type: "region_state", ...R}, "*");
+  return [on, frac];
+}"""
+
+
+def _region_text(region: dict | None) -> str:
+    if not region:
+        return ""
+    x, y, z = region["center"]
+    return f"Region: centre ({x:.2f}, {y:.2f}, {z:.2f}), radius {region['radius']:.2f}"
+
+
+def on_region_toggle(on: bool, _frac: float):
+    """Outputs: region, region text. Off clears the marked region."""
+    if not on:
+        return None, ""
+    return gr.skip(), "Click the scene in the viewer to mark the centre of the region."
+
+
+def on_region_bridge(text: str | None):
+    """Region marked in the viewer (JSON) -> region state and its description."""
+    try:
+        d = json.loads(text or "")
+        region = {"center": [float(c) for c in d["center"]], "radius": float(d["radius"])}
+    except (ValueError, TypeError, KeyError):
+        return gr.skip(), gr.skip()
+    return region, _region_text(region)
+
+
+def on_edit(scene_id, number, prompt, seed, region_on, region):
+    """Start an Edit scene job on the shown version. Outputs: status, edit_job."""
+    version = _version(scene_id, number)
+    if version is None:
+        raise gr.Error("Pick a finished scene first.")
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise gr.Error("Write an instruction first, e.g. 'make the façade green'.")
+    try:
+        area = edit_scene.parse_region(bool(region_on), region)
+    except EditError as e:
+        raise gr.Error(str(e)) from e
+    job = EDITS.create_edit(
+        prompt, version.path, scene_id, version.number, region=area, seed=int(seed or 0)
+    )
+    if job.status == "failed":
+        return f"**Could not start.** {job.error['message']}", None
+    where = " inside the marked region" if area else ""
+    return (
+        f"⚙️ Editing v{version.number}{where} (job {job.job_id}). This takes about "
+        "10 to 20 minutes; you can keep working, the result becomes a new version.",
+        job.job_id,
+    )
+
+
+def on_edit_tick(edit_job, scene_id, obj_job, placing):
+    """Poll the edit job; when done, store its version and open it.
+
+    Outputs: status, edit_job, result column, before, after, then `SCENE_OUTPUTS`.
+    The new version is opened only if its scene is shown and no object is being placed.
+    """
+    keep = [gr.skip()] * 10
+    if not edit_job:
+        return [gr.skip()] * 5 + keep
+    job = EDITS.get(edit_job)
+    job = EDITS.refresh(job) if job else None
+    if job is None:
+        return ["The edit job was not found.", None, *[gr.skip()] * 3, *keep]
+    if job.status == "failed":
+        err = job.error or {}
+        msg = f"❌ **Edit failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
+        return [msg, None, *[gr.skip()] * 3, *keep]
+    if job.status != "done":
+        label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Editing"
+        elapsed = format_elapsed(job.elapsed(EDITS.clock()))
+        return [f"{label}: **{job.summary}** ({elapsed})", *[gr.skip()] * 4, *keep]
+    try:
+        new = edit_scene.finish_edit(STORE, EDITS, job)
+    except edit_scene.FinishError as e:
+        return [f"❌ **The edit could not be saved.** {e}", None, *[gr.skip()] * 3, *keep]
+    before = STORE.download(f"{job.scene_path}/before.png")
+    after = STORE.download(f"{job.scene_path}/after.png")
+    images = [gr.update(visible=True), str(before) if before else None,
+              str(after) if after else None]  # fmt: skip
+    seconds = job.run.get("seconds")
+    took = f" in {format_elapsed(seconds)}" if seconds else ""
+    msg = f"✅ Edit **{job.summary}** saved as v{new.number}{took}."
+    if scene_id == new.scene_id and not placing:
+        gr.Info(f"Edit saved as v{new.number}; it is now shown.")
+        return [msg, None, *images, *scene_view(scene_id, new.number, obj_job, placing)]
+    return [f"{msg} Open it from the History tab.", None, *images, *keep]
+
+
 # --- preview (task 4.3) --------------------------------------------------------------
 
 # Asks the viewer iframe for its camera and passes it on as the first input (JSON).
@@ -587,7 +704,7 @@ def on_create(files: list[str] | None):
 
 
 CSS = """
-#placement-bridge, #camera-bridge { display: none !important; }
+#placement-bridge, #camera-bridge, #region-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
 #history-table tbody tr { cursor: pointer; }
 """
@@ -600,7 +717,7 @@ def build() -> gr.Blocks:
             gr.Markdown("⚠️ `SPLAT_STUDIO_DATASET` is not set: jobs are stored locally only.")
         version, hidden, seen = gr.State(None), gr.State([]), gr.State(None)
         obj_job, placing, floor = gr.State(None), gr.State(False), gr.State(None)
-        preview_job = gr.State(None)
+        preview_job, edit_job, region = gr.State(None), gr.State(None), gr.State(None)
 
         with gr.Tabs(selected="new") as tabs:
             # --- New scene: upload, create, jobs -----------------------------------
@@ -669,6 +786,33 @@ def build() -> gr.Blocks:
                                             "Place in new version", variant="primary"
                                         )
                                         place_cancel = gr.Button("Cancel")
+                            with gr.Tab("Edit scene"):
+                                gr.Markdown(
+                                    "Change the shown version from a text instruction. The "
+                                    "result is a new version; objects added before become "
+                                    "part of the scene."
+                                )
+                                edit_prompt = gr.Textbox(
+                                    label="Instruction", placeholder="make the façade green"
+                                )
+                                region_on = gr.Checkbox(value=False, label="Limit to a region")
+                                region_frac = gr.Slider(
+                                    0.05, 1.0, value=0.2, step=0.01,
+                                    label="Region size (share of the scene)",
+                                )  # fmt: skip
+                                region_text = gr.Markdown()
+                                with gr.Row():
+                                    edit_seed = gr.Number(label="Seed", value=0, precision=0)
+                                    edit_go = gr.Button("Edit scene", variant="primary")
+                                edit_status = gr.Markdown()
+                                with gr.Column(visible=False) as edit_col:
+                                    with gr.Row():
+                                        edit_before = gr.Image(
+                                            label="Before (one view)", interactive=False
+                                        )
+                                        edit_after = gr.Image(
+                                            label="After (same view)", interactive=False
+                                        )
                             with gr.Tab("Preview"):
                                 gr.Markdown(
                                     "Restyle the current view as a 2D image. Aim the camera "
@@ -696,6 +840,9 @@ def build() -> gr.Blocks:
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
+                region_bridge = gr.Textbox(
+                    elem_id="region-bridge", show_label=False, container=False
+                )
         sliders = [px, py, pz, pturn, psize]
         end = [place_group, placing, obj_job]
         scene_outputs = [
@@ -757,6 +904,23 @@ def build() -> gr.Blocks:
             [obj_status, viewer, place_group, placing, obj_job],
             js=GET_CAMERA_JS,
         )
+
+        # Edit scene
+        region_on.change(
+            on_region_toggle, [region_on, region_frac], [region, region_text], js=REGION_JS
+        )
+        region_frac.input(None, [region_on, region_frac], None, js=REGION_JS)
+        region_bridge.change(on_region_bridge, region_bridge, [region, region_text])
+        edit_go.click(
+            on_edit,
+            [picker, version, edit_prompt, edit_seed, region_on, region],
+            [edit_status, edit_job],
+        )
+        gr.Timer(10).tick(
+            on_edit_tick,
+            [edit_job, picker, obj_job, placing],
+            [edit_status, edit_job, edit_col, edit_before, edit_after, *scene_outputs],
+        ).then(*log)
 
         # Preview
         pv_go.click(

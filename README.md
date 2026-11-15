@@ -104,6 +104,7 @@ The page has two tabs. It opens on **Scene** when a finished scene exists (at it
 - **Scene:** pick a scene; the viewer is on the left, the tools on the right. Switching tools keeps the scene, version, camera and any object being placed.
   - **History:** every version with date, mode, prompt, model and the version it was made from. Click a row to open that version. "Prompt log" also lists the 2D previews.
   - **Add object:** describe an object and generate it (a few minutes). Then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders (they follow the viewer). "Show object" hides it while you look around. "Place in new version" saves a new version; "Cancel" saves nothing.
+  - **Edit scene:** write an instruction (e.g. "make the façade green") to change the shown version; the result is a new version after about 10 to 20 minutes. Tick "Limit to a region", click the scene to mark its centre and set its size, to change only that part. Objects added before become part of the scene.
   - **Preview:** aim the camera, describe a look, and get a restyled 2D image of that view. The scene is not changed.
 - **Objects shown** (under the viewer, for versions made with Add object): untick an object to hide it in the viewer. This changes only the view; downloads always contain every object. Versions made before object tracking have no such controls.
 

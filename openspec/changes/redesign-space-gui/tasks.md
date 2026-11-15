@@ -52,3 +52,5 @@ Start after task 4.3 (Preview) of `add-splat-studio-mvp` is committed.
 - 4.3: hiding reloads the viewer and keeps the camera (the `get_camera` reply now carries the
   orbit target). During placement the object stays in the reloaded viewer.
 - open: 1.4, 3.4 and 4.5 need a real browser with Gradio (local WSL run).
+- 2026-11-15: MVP task 4.4 added the Edit scene sub-tab next to the others, as planned in
+  proposal.md.

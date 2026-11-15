@@ -571,3 +571,104 @@ def render_preview(
     _upload_json(api, repo, f"{prefix}/run.json", result)
     print(json.dumps(result))
     return result
+
+
+# Edit scene (task 4.4): Instruct-NeRF2NeRF-style iterative dataset update on virtual views
+# (see splat_studio/editing/scene_edit.py). InstructPix2Pix in fp16 needs about 4 GB and
+# fine-tuning a few million Gaussians at 512 px fits next to it on an A10G (24 GB).
+EDIT_GPU = "A10G"
+EDIT_TIMEOUT_S = 40 * 60  # keep in sync with splat_studio/space/jobs.py
+
+
+@app.function(
+    image=preview_image,
+    gpu=EDIT_GPU,
+    timeout=EDIT_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+)
+def edit_scene(
+    job_id: str, scene_path: str, prompt: str, region: dict | None = None, seed: int = 0
+) -> dict:
+    """Apply a text instruction to the scene under `scene_path`; uploads to edits/<job_id>/.
+
+    Writes scene.ply and scene.splat (the edited scene; the Space stores them as a new
+    version) and before.png, edited_view.png, after.png (one view, for checking).
+    `region` is `Region.to_dict()`: only Gaussians inside that sphere change.
+    """
+    t = time.time()
+    from huggingface_hub import HfApi, hf_hub_download
+    from PIL import Image
+
+    from splat_studio import models
+    from splat_studio.editing import scene_edit
+    from splat_studio.reconstruction import errors
+    from splat_studio.reconstruction.cost import RunLog
+    from splat_studio.reconstruction.export import read_ply, to_splat_bytes, write_ply
+
+    repo = os.environ["SPLAT_STUDIO_DATASET"]
+    api = HfApi()
+    prefix = f"edits/{job_id}"
+    log = RunLog(job_id=job_id, gpu=EDIT_GPU)
+    _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
+
+    try:
+        from splat_studio.editing.scene_edit_gpu import run_edit
+
+        log.stage("imports", time.time() - t)
+        try:
+            area = scene_edit.Region.from_dict(region)
+        except scene_edit.EditError as e:
+            raise errors.edit_region(str(e)) from e
+
+        t = time.time()
+        scene_ply = hf_hub_download(repo, f"{scene_path}/scene.ply", repo_type="dataset")
+        scene = read_ply(Path(scene_ply))
+        log.stage("download_scene", time.time() - t)
+
+        try:
+            edited, stats, images = run_edit(scene, prompt, area, seed, on_stage=log.stage)
+        except scene_edit.EditError as e:
+            raise errors.edit_region(str(e)) from e
+        models_volume.commit()  # keep downloaded weights for the next run
+
+        t = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            write_ply(tmp_path / "scene.ply", edited)
+            (tmp_path / "scene.splat").write_bytes(to_splat_bytes(edited))
+            for name, pixels in images.items():
+                Image.fromarray(pixels).save(tmp_path / name)
+            for name in ["scene.ply", "scene.splat", *images]:
+                api.upload_file(
+                    path_or_fileobj=str(tmp_path / name),
+                    path_in_repo=f"{prefix}/{name}",
+                    repo_id=repo,
+                    repo_type="dataset",
+                )
+        log.stage("upload", time.time() - t)
+        log.finish("done")
+        result = {
+            **log.to_dict(),
+            "scene_path": prefix,
+            "source_scene": scene_path,
+            "model": models.IMAGE_EDIT.label,
+            "prompt": prompt,
+            "seed": seed,
+            "region": region,
+            "num_gaussians": len(edited),
+            **stats,
+        }
+    except errors.ReconstructionError as e:
+        result = log.finish("failed", e.to_dict()).to_dict()
+    except Exception as e:
+        import traceback
+
+        err = errors.edit_failed(repr(e))
+        err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
+        result = log.finish("failed", err.to_dict()).to_dict()
+
+    _upload_json(api, repo, f"{prefix}/run.json", result)
+    print(json.dumps(result))
+    return result
