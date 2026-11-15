@@ -11,8 +11,9 @@ two-finger drag) pans, wheel (or pinch) zooms. "Reset view" (or the R key) retur
 to the start camera.
 
 Placement mode (task 4.2): a second `.splat` (a generated object) is loaded next to
-the scene with its own position, turn and size. The page listens for
-`{type: "placement", x, y, z, turn, size}` messages from the Space and moves the
+the scene with its own position, rotation (turn about the up axis, tilt about the
+object's x and y axes) and size. The page listens for
+`{type: "placement", x, y, z, turn, size, tiltX, tiltY}` messages from the Space and moves the
 object live, so dragging a slider does not reload the scene.
 
 Preview (task 4.3): on `{type: "get_camera", id}` the page replies to the sender with
@@ -23,9 +24,10 @@ view on screen, and a reloaded viewer can start where the user was looking.
 Click and drag (redesign-space-gui): during placement a click on the scene puts the
 object's base on the clicked splat (the library's raycast), or on the floor plane
 (`floor`, see `add_object.floor_height`) if no splat is hit. Dragging the object moves
-it in the horizontal plane at its current height; Shift-drag turns it. Orbiting is
-paused while dragging. After a click or drag the page posts
-`{type: "placement_changed", x, y, z, turn, size}` to the Space, answers
+it in the horizontal plane at its current height; Shift-drag turns it; Alt-drag tilts
+it (sideways about y, up and down about x). Orbiting is paused while dragging. After
+a click or drag the page posts
+`{type: "placement_changed", x, y, z, turn, size, tiltX, tiltY}` to the Space, answers
 `{type: "get_placement", id}` with `{type: "placement", id, ...}`, and shows or hides
 the object on `{type: "object_visible", visible}`.
 
@@ -143,7 +145,7 @@ def viewer_document(
     """Self-contained HTML page that shows one `.splat` scene.
 
     `obj` adds a movable object: {"url": ..., "position": [...], "quaternion": [x, y, z, w],
-    "scale": [...], "turn": degrees, "visible": bool} (see
+    "scale": [...], "turn": degrees, "tiltX": degrees, "tiltY": degrees, "visible": bool} (see
     `editing.objects.Placement.to_viewer`). Clicks that hit no splat land on the plane
     at height `floor`.
     """
@@ -262,18 +264,24 @@ function scenePoint(THREE, viewer, mouse, hide) {
 function setupPlacement(THREE, viewer, o) {
   const obj = viewer.getSplatScene(1);
   const p = { x: o.position[0], y: o.position[1], z: o.position[2],
-              turn: Number(o.turn) || 0, size: o.scale[0] };
+              turn: Number(o.turn) || 0, size: o.scale[0],
+              tiltX: Number(o.tiltX) || 0, tiltY: Number(o.tiltY) || 0 };
+  const deg = Math.PI / 180;
+  const euler = new THREE.Euler();
+  const wrap = (t) => ((t + 180) % 360 + 360) % 360 - 180;
   obj.visible = o.visible !== false;
   const round = (v, n = 1000) => Math.round(v * n) / n;
   const apply = () => {
-    const half = p.turn * Math.PI / 360;
     obj.position.set(p.x, p.y, p.z);
-    obj.quaternion.set(0, 0, Math.sin(half), Math.cos(half));  // turn about z (up)
+    // Rz(turn) * Ry(tiltY) * Rx(tiltX), as in editing/objects.py
+    euler.set(p.tiltX * deg, p.tiltY * deg, p.turn * deg, "ZYX");
+    obj.quaternion.setFromEuler(euler);
     const size = Math.max(p.size, 1e-4);
     obj.scale.set(size, size, size);
   };
   const values = () => ({ x: round(p.x), y: round(p.y), z: round(p.z),
-                          turn: Math.round(p.turn), size: round(p.size, 10000) });
+                          turn: Math.round(p.turn), size: round(p.size, 10000),
+                          tiltX: Math.round(p.tiltX), tiltY: Math.round(p.tiltY) });
   const tell = () => {
     window.parent.postMessage({ type: "placement_changed", ...values() }, "*");
   };
@@ -284,6 +292,7 @@ function setupPlacement(THREE, viewer, o) {
     if (d.type === "placement") {
       p.x = Number(d.x); p.y = Number(d.y); p.z = Number(d.z);
       p.turn = Number(d.turn) || 0; p.size = Number(d.size) || p.size;
+      p.tiltX = Number(d.tiltX) || 0; p.tiltY = Number(d.tiltY) || 0;
       apply();
     } else if (d.type === "get_placement" && e.source) {
       e.source.postMessage({ type: "placement", id: d.id, ...values() }, "*");
@@ -329,7 +338,8 @@ function setupPlacement(THREE, viewer, o) {
     const r = rayAt(e);
     if (!hitsObject(r)) return;
     const start = onPlane(r, p.z);
-    drag = { id: e.pointerId, shift: e.shiftKey, x0: e.clientX, turn0: p.turn,
+    drag = { id: e.pointerId, shift: e.shiftKey, alt: e.altKey, x0: e.clientX, y0: e.clientY,
+             turn0: p.turn, tiltX0: p.tiltX, tiltY0: p.tiltY,
              offset: start ? new THREE.Vector3(p.x - start.x, p.y - start.y, 0) : null };
     if (viewer.controls) viewer.controls.enabled = false;
     root.setPointerCapture(e.pointerId);
@@ -341,9 +351,11 @@ function setupPlacement(THREE, viewer, o) {
       if (!drag && e.buttons === 0) root.style.cursor = hitsObject(rayAt(e)) ? "grab" : "";
       return;
     }
-    if (drag.shift || e.shiftKey) {
-      const t = drag.turn0 + (e.clientX - drag.x0) * 0.5;
-      p.turn = ((t + 180) % 360 + 360) % 360 - 180;
+    if (drag.alt || e.altKey) {
+      p.tiltY = wrap(drag.tiltY0 + (e.clientX - drag.x0) * 0.5);
+      p.tiltX = wrap(drag.tiltX0 + (e.clientY - drag.y0) * 0.5);
+    } else if (drag.shift || e.shiftKey) {
+      p.turn = wrap(drag.turn0 + (e.clientX - drag.x0) * 0.5);
     } else if (drag.offset) {
       const q = onPlane(rayAt(e), p.z);
       if (q) { p.x = q.x + drag.offset.x; p.y = q.y + drag.offset.y; }
@@ -361,7 +373,8 @@ function setupPlacement(THREE, viewer, o) {
   };
   root.addEventListener("pointerup", end, true);
   root.addEventListener("pointercancel", end, true);
-  tip.textContent = "Click the scene: put the object there · Drag it: move · Shift-drag: turn";
+  tip.textContent = "Click the scene: put the object there · Drag it: move · " +
+    "Shift-drag: turn · Alt-drag: tilt";
   tip.style.display = "block";
 }
 
