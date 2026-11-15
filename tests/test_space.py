@@ -98,8 +98,8 @@ class FakeClient:
         self.submitted.append((job_id, steps))
         return f"fc-{job_id}"
 
-    def submit_object(self, job_id: str, prompt: str, seed: int = 0) -> str:
-        self.submitted.append((job_id, prompt, seed))
+    def submit_object(self, job_id: str, prompt: str, seed: int = 0, **kwargs) -> str:
+        self.submitted.append((job_id, prompt, seed, *kwargs.values()))
         return f"fc-{job_id}"
 
     def poll(self, call_id: str):
@@ -426,6 +426,34 @@ def test_object_job_lives_under_objects_and_finishes(tmp_path: Path) -> None:
     client.results[job.call_id] = {"status": "done", "scene_path": f"objects/{job.job_id}"}
     assert mgr.refresh(job).scene_path == f"objects/{job.job_id}"
     assert [j.job_id for j in mgr.list()] == [job.job_id]
+
+
+def test_object_job_from_photo_uploads_reference(tmp_path: Path) -> None:
+    store, client, clock = jobs.LocalStore(tmp_path / "s"), FakeClient(), Clock()
+    mgr = jobs.JobManager(store, client, clock, prefix="objects", timeout_s=900)
+    photo = tmp_path / "My Bench.JPG"
+    photo.write_bytes(b"jpeg")
+    job = mgr.create_object("", scene_id="scene1", image=photo)
+    ref = f"objects/{job.job_id}/input/reference.jpg"
+    assert client.submitted == [(job.job_id, "", 0, ref)]
+    assert (store.root / ref).read_bytes() == b"jpeg"
+    assert job.summary == "object from My Bench.JPG"
+    assert job.params["source"] == "image" and job.params["reference_path"] == ref
+    named = mgr.create_object("old bench", image=photo)
+    assert named.summary == "old bench"
+
+
+def test_validate_object_image(tmp_path: Path) -> None:
+    from splat_studio.space.validation import UploadError, validate_object_image
+
+    ok = tmp_path / "a.webp"
+    ok.write_bytes(b"x")
+    assert validate_object_image(str(ok)) == ok
+    gif = tmp_path / "a.gif"
+    gif.write_bytes(b"x")
+    for bad in (None, gif):
+        with pytest.raises(UploadError):
+            validate_object_image(bad)
 
 
 def test_object_job_errors_use_object_wording(tmp_path: Path) -> None:

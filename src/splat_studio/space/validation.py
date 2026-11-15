@@ -83,3 +83,23 @@ def validate_upload(
     if n > MAX_PHOTOS:
         raise UploadError(f"At most {MAX_PHOTOS} photos are allowed (you uploaded {n}).")
     return ValidUpload("photos", sorted(photos), f"{n} photos.")
+
+
+OBJECT_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+MAX_OBJECT_IMAGE_BYTES = 20 * 1024 * 1024
+OBJECT_IMAGE_HELP = "Use one PNG, JPG or WebP photo of the object, up to 20 MB."
+
+
+def validate_object_image(path: str | Path | None) -> Path:
+    """Return the reference image for Add object if it is usable, else raise UploadError."""
+    if not path:
+        raise UploadError(f"No image uploaded. {OBJECT_IMAGE_HELP}")
+    image = Path(path)
+    if image.suffix.lower() not in OBJECT_IMAGE_EXT:
+        raise UploadError(f"Unsupported image type: {image.name}. {OBJECT_IMAGE_HELP}")
+    if image.stat().st_size > MAX_OBJECT_IMAGE_BYTES:
+        raise UploadError(
+            f"The image is {_mb(image.stat().st_size)}; the limit is "
+            f"{_mb(MAX_OBJECT_IMAGE_BYTES)}. {OBJECT_IMAGE_HELP}"
+        )
+    return image
