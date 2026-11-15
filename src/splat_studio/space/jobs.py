@@ -6,7 +6,8 @@ State lives in the dataset repo, so a job survives the user closing the page:
   jobs/<job_id>/run.json    worker-side run log (written by modal_app/app.py)
   scenes/<job_id>/v1/...    finished scene
 Object jobs (task 4.2) use the same layout under `objects/<job_id>/`, with the
-generated object in `object.ply`, `object.splat` and `reference.png`.
+generated object in `object.ply`, `object.splat` and `reference.png`; an uploaded
+reference photo goes to `objects/<job_id>/input/reference.<ext>`.
 Preview jobs (task 4.3) live under `previews/<job_id>/` with `render.png`, `depth.png`
 and `preview.png`; they never write to `scenes/`. Edit jobs (task 4.4) live under
 `edits/<job_id>/` with before/after renders; the worker itself saves the edited scene
@@ -218,13 +219,32 @@ class JobManager:
         self._save(job)
         return self._start(job, lambda: self.client.submit_reconstruction(job.job_id, steps=steps))
 
-    def create_object(self, prompt: str, scene_id: str | None = None, seed: int = 0) -> Job:
-        """Record an object job and start the Modal text-to-3D function."""
+    def create_object(
+        self,
+        prompt: str,
+        scene_id: str | None = None,
+        seed: int = 0,
+        image: Path | None = None,
+    ) -> Job:
+        """Record an object job and start the Modal text-to-3D function.
+
+        With `image`, the photo is uploaded to `<prefix>/<job_id>/input/` and used as the
+        reference image (no text-to-image step); `prompt` then only names the object.
+        """
         now = self.clock()
-        job = Job(new_job_id(now), "object", " ".join(prompt.split())[:80], now)
+        name = " ".join(prompt.split())[:80] or (f"object from {image.name}" if image else "")
+        job = Job(new_job_id(now), "object", name[:80], now)
         job.params = {"prompt": prompt, "seed": seed, "scene_id": scene_id}
+        reference_path = None
+        if image is not None:
+            reference_path = f"{self.prefix}/{job.job_id}/input/reference{image.suffix.lower()}"
+            self.store.upload_files({reference_path: image}, f"Reference image for {job.job_id}")
+            job.params.update(source="image", reference_path=reference_path)
         self._save(job)
-        return self._start(job, lambda: self.client.submit_object(job.job_id, prompt, seed=seed))
+        kwargs = {"reference_path": reference_path} if reference_path else {}
+        return self._start(
+            job, lambda: self.client.submit_object(job.job_id, prompt, seed=seed, **kwargs)
+        )
 
     def create_edit(
         self,

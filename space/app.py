@@ -44,7 +44,12 @@ from splat_studio.space.jobs import (  # noqa: E402
     LocalStore,
     format_elapsed,
 )
-from splat_studio.space.validation import HELP, UploadError, validate_upload  # noqa: E402
+from splat_studio.space.validation import (  # noqa: E402
+    HELP,
+    UploadError,
+    validate_object_image,
+    validate_upload,
+)
 from splat_studio.space.versions import (  # noqa: E402
     HISTORY_COLUMNS,
     MODE_LABEL,
@@ -545,15 +550,29 @@ def parse_placement(text: str | None) -> tuple[float, ...] | None:
     return values  # type: ignore[return-value]
 
 
-def on_generate(scene_id, number, prompt: str, seed: float | None, placing: bool):
+def on_generate(
+    scene_id: str | None,
+    number: int | None,
+    prompt: str,
+    seed: float | None,
+    image: str | None,
+    placing: bool,
+):
+    """Start an object job from the text, or from an uploaded photo if there is one."""
     if _version(scene_id, number) is None:
         raise gr.Error("Pick a finished scene first.")
     if placing:
         raise gr.Error("Save or cancel the current object first.")
     prompt = (prompt or "").strip()
-    if not prompt:
-        raise gr.Error("Describe the object first, e.g. 'a mature oak tree'.")
-    job = OBJECTS.create_object(prompt, scene_id=scene_id, seed=int(seed or 0))
+    reference = None
+    if image:
+        try:
+            reference = validate_object_image(image)
+        except UploadError as e:
+            raise gr.Error(str(e)) from e
+    elif not prompt:
+        raise gr.Error("Describe the object, e.g. 'a mature oak tree', or upload a photo of it.")
+    job = OBJECTS.create_object(prompt, scene_id=scene_id, seed=int(seed or 0), image=reference)
     if job.status == "failed":
         return f"**Could not start.** {job.error['message']}", None, False, gr.update(visible=False)
     return (
@@ -948,6 +967,11 @@ def build() -> gr.Blocks:
                                 obj_prompt = gr.Textbox(
                                     label="Object", placeholder="a mature oak tree"
                                 )
+                                obj_image = gr.Image(
+                                    label="Or start from a photo (optional; the text then "
+                                    "only names the object)",
+                                    type="filepath", sources=["upload"], height=160,
+                                )  # fmt: skip
                                 with gr.Row():
                                     obj_seed = gr.Number(label="Seed", value=0, precision=0)
                                     obj_go = gr.Button("Generate object")
@@ -1071,7 +1095,7 @@ def build() -> gr.Blocks:
             obj_go,
             "⏳ Starting…",
             on_generate,
-            [picker, version, obj_prompt, obj_seed, placing],
+            [picker, version, obj_prompt, obj_seed, obj_image, placing],
             [obj_status, obj_job, placing, place_group],
         ).then(*lib)
         gr.Timer(5).tick(

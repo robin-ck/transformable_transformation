@@ -49,8 +49,12 @@ def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
     return spawn("reconstruct", job_id, steps=steps)
 
 
-def submit_object(job_id: str, prompt: str, seed: int = 0) -> str:
-    return spawn_method("ObjectGenerator", "generate", job_id, prompt, seed=seed)
+def submit_object(
+    job_id: str, prompt: str, seed: int = 0, reference_path: str | None = None
+) -> str:
+    """`reference_path` (a dataset path) makes the worker skip text-to-image."""
+    kwargs = {"reference_path": reference_path} if reference_path else {}
+    return spawn_method("ObjectGenerator", "generate", job_id, prompt, seed=seed, **kwargs)
 
 
 def submit_edit(

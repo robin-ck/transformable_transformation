@@ -323,10 +323,16 @@ class ObjectGenerator:
 
     @modal.method()
     def generate(
-        self, job_id: str, prompt: str, seed: int = 0, reference_image: str | None = None
+        self,
+        job_id: str,
+        prompt: str,
+        seed: int = 0,
+        reference_image: str | None = None,
+        reference_path: str | None = None,
     ) -> dict:
-        """Uploads the object to objects/<job_id>/. `reference_image` (a path inside the
-        container) skips the text-to-image step."""
+        """Uploads the object to objects/<job_id>/. A reference image skips the
+        text-to-image step: `reference_path` is a file in the dataset (a user's photo),
+        `reference_image` a path inside the container (for testing)."""
         import torch
         from huggingface_hub import HfApi
 
@@ -343,10 +349,14 @@ class ObjectGenerator:
         log = RunLog(job_id=job_id, gpu=OBJECT_GPU)
         _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
         model_label = f"{models.TEXT_TO_IMAGE.label} + {models.IMAGE_TO_3D.label}"
-        if reference_image:
+        if reference_image or reference_path:
             model_label = models.IMAGE_TO_3D.label
 
         try:
+            if reference_path:
+                from huggingface_hub import hf_hub_download
+
+                reference_image = hf_hub_download(repo, reference_path, repo_type="dataset")
             if self.flux is None or self.trellis is None:
                 self._load_models()  # enter failed: load here so the error is reported
             self.loads.apply(log)
@@ -355,9 +365,12 @@ class ObjectGenerator:
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
                 if reference_image:
-                    from PIL import Image
+                    from PIL import Image, ImageOps
 
-                    image = Image.open(reference_image)
+                    # Phone photos store their rotation in EXIF; TRELLIS needs it applied.
+                    image = ImageOps.exif_transpose(Image.open(reference_image))
+                    if image.mode not in ("RGB", "RGBA"):
+                        image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
                     image.save(tmp_path / "reference.png")
                 else:
                     t = time.time()

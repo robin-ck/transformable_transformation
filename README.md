@@ -73,6 +73,8 @@ modal run modal_app/app.py::gpu_probe
 modal deploy modal_app/app.py
 ```
 
+**Redeploy whenever `modal_app/app.py` changes**, including when you only test a branch locally: the Space (local or hosted) always calls the deployed Modal app, never your local copy. Deploy the worker before the Space, from a checkout of the same branch. A Space that is newer than the worker fails with errors such as `got an unexpected keyword argument`. Workers stay warm for a few minutes after a job; if one still runs old code after a deploy, stop it with `modal app stop splat-studio` and deploy again.
+
 Reconstruction reads inputs from `jobs/<job_id>/input/` in the dataset and writes `scenes/<job_id>/v1/scene.ply`, `scene.splat` and a run log with stage timings and estimated cost to `jobs/<job_id>/run.json`. GPU prices in `reconstruction/cost.py` are approximate; check modal.com/pricing.
 
 ## Space (Gradio UI)
@@ -85,7 +87,7 @@ Run it locally (needs `pip install "gradio>=5,<6" huggingface_hub modal`):
 python space/app.py
 ```
 
-With `SPLAT_STUDIO_DATASET` and `HF_TOKEN` set, jobs are stored in the HF dataset; without them, in `./local_data` (UI work only, since the Modal job reads its inputs from HF Hub).
+Run `modal deploy modal_app/app.py` from the same checkout first if `modal_app/app.py` changed (see above). With `SPLAT_STUDIO_DATASET` and `HF_TOKEN` set, jobs are stored in the HF dataset; without them, in `./local_data` (UI work only, since the Modal job reads its inputs from HF Hub).
 
 Deploy to a Hugging Face Space (Gradio SDK) by uploading `space/` as the Space root and the package next to it:
 
@@ -103,7 +105,7 @@ The page has two tabs. It opens on **Scene** when a finished scene exists (at it
 - **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; pick it in the "Finished scene" list of the Scene tab to open it.
 - **Scene:** pick a scene; the viewer is on the left, the tools on the right. Switching tools keeps the scene, version, camera and any object being placed.
   - **History:** every version with date, mode, prompt, model and the version it was made from. Click a row to open that version. "Prompt log" also lists the 2D previews.
-  - **Objects:** a table of the objects in the open version and those generated for the scene. Click **Hide**/**Show** to drop an object from the view only (downloads always contain every object). Click **Add** on a generated object to place another copy. Click a placed object's name to move, turn, tilt or resize it; "Save as new version" re-places it there, the other objects stay put. To make a new object, describe it and generate it (a few minutes); then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders. "Show object" hides it while you look around; "Cancel" saves nothing.
+  - **Objects:** a table of the objects in the open version and those generated for the scene. Click **Hide**/**Show** to drop an object from the view only (downloads always contain every object). Click **Add** on a generated object to place another copy. Click a placed object's name to move, turn, tilt or resize it; "Save as new version" re-places it there, the other objects stay put. To make a new object, describe it, or upload a photo of it (PNG, JPG or WebP up to 20 MB; the text then only names it), and generate it (a few minutes). Photos of one object on a plain background work best. Then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders. "Show object" hides it while you look around; "Cancel" saves nothing.
   - **Edit scene:** a table lists every edit of the scene (running ones too). **Hide** on an edit the open version builds on shows the scene from before it, plus objects placed after it (view only, downloads unchanged; objects placed between two edits belong to the later edit). **Open** shows an edit from another branch. To make one, aim the camera, write an instruction (e.g. "make the table green") and start the edit; about 10 minutes later the result is a new version, saved even if you close the page. The edit is strongest around the current view. Tick "Limit to a region" and drag a box in the viewer to change only that part (recommended for single objects).
   - **Preview:** aim the camera, describe a look, and get a restyled 2D image of that view. The scene is not changed.
 
