@@ -45,8 +45,8 @@ def poll(call_id: str) -> tuple[str, dict | None]:
         return "running", None
 
 
-def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
-    return spawn("reconstruct", job_id, steps=steps)
+def submit_reconstruction(job_id: str, steps: int = 7000, frames: int = 180) -> str:
+    return spawn("reconstruct", job_id, steps=steps, frames=frames)
 
 
 def submit_object(

@@ -61,6 +61,7 @@ def run(
     work_dir: Path,
     gsplat_dir: Path,
     steps: int = DEFAULT_STEPS,
+    target_frames: int = frames.TARGET_FRAMES,
     on_stage: Callable[[str, float], None] | None = None,
 ) -> Result:
     """Frames -> poses -> training -> export. Raises ReconstructionError on failure."""
@@ -78,7 +79,7 @@ def run(
     images.mkdir(parents=True, exist_ok=True)
 
     if kind == "video":
-        n = timed("frames", lambda: frames.extract_frames(files[0], images))
+        n = timed("frames", lambda: frames.extract_frames(files[0], images, target_frames))
     else:
         for i, p in enumerate(files):
             shutil.copy(p, images / f"{i:05d}{p.suffix.lower()}")

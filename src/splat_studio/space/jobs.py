@@ -210,14 +210,21 @@ class JobManager:
             ).to_dict()
         return self._save(job)
 
-    def create(self, upload: ValidUpload, steps: int = 7000) -> Job:
-        """Upload inputs, record the job, start the Modal reconstruction."""
+    def create(self, upload: ValidUpload, steps: int = 7000, frames: int = 180) -> Job:
+        """Upload inputs, record the job, start the Modal reconstruction.
+
+        `frames` is how many frames to take from a video (ignored for photos)."""
         now = self.clock()
         job = Job(new_job_id(now), upload.kind, upload.summary, now)
+        job.params = {"steps": steps}
+        if upload.kind == "video":
+            job.params["frames"] = frames
         files = {f"jobs/{job.job_id}/input/{i:03d}_{p.name}": p for i, p in enumerate(upload.files)}
         self.store.upload_files(files, f"Inputs for job {job.job_id}")
         self._save(job)
-        return self._start(job, lambda: self.client.submit_reconstruction(job.job_id, steps=steps))
+        return self._start(
+            job, lambda: self.client.submit_reconstruction(job.job_id, steps=steps, frames=frames)
+        )
 
     def create_object(
         self,

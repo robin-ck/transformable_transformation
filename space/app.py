@@ -720,12 +720,12 @@ def on_download(job_id: str | None, number: int | None, kind: str):
     return gr.update(value=str(path), visible=True)
 
 
-def on_create(files: list[str] | None):
+def on_create(files: list[str] | None, steps: float = 7000, frames: float = 180):
     try:
         upload = validate_upload(files)
     except UploadError as e:
         return f"**Upload rejected.** {e}", jobs_table()
-    job = JOBS.create(upload)
+    job = JOBS.create(upload, steps=int(steps), frames=int(frames))
     if job.status == "failed":
         return f"**Could not start the job.** {job.error['message']}", jobs_table()
     return f"**Job {job.job_id} started.** It appears in the list below.", jobs_table()
@@ -771,6 +771,25 @@ def build() -> gr.Blocks:
                     file_types=[".mp4", ".mov", ".jpg", ".jpeg", ".png"],
                 )
                 message = gr.Markdown(HELP)
+                with gr.Accordion("Quality settings", open=False):
+                    steps = gr.Slider(
+                        2000,
+                        30000,
+                        value=7000,
+                        step=1000,
+                        label="Training steps",
+                        info="More steps give sharper detail but cost more GPU time "
+                        "(30,000 takes roughly 4x as long as 7,000).",
+                    )
+                    n_frames = gr.Slider(
+                        60,
+                        400,
+                        value=180,
+                        step=10,
+                        label="Frames taken from a video",
+                        info="More frames help large or detailed scenes; camera pose "
+                        "estimation gets slower. Ignored for photo uploads.",
+                    )
                 create = gr.Button("Create scene", variant="primary", interactive=False)
                 gr.Markdown("## Jobs")
                 table = gr.Dataframe(headers=COLUMNS, interactive=False, wrap=True)
@@ -912,7 +931,7 @@ def build() -> gr.Blocks:
 
         # New scene
         files.change(on_upload, files, [message, create])
-        clicked(create, "⏳ Starting…", on_create, files, [message, table])
+        clicked(create, "⏳ Starting…", on_create, [files, steps, n_frames], [message, table])
         clicked(refresh, "⏳ Refreshing…", refresh_all, picker, [table, picker])
 
         # Start tab, finished-job notice, opening scenes and versions

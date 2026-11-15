@@ -94,8 +94,8 @@ class FakeClient:
         self.submitted: list[tuple[str, int]] = []
         self.results: dict[str, object] = {}  # call_id -> result dict or exception
 
-    def submit_reconstruction(self, job_id: str, steps: int = 7000) -> str:
-        self.submitted.append((job_id, steps))
+    def submit_reconstruction(self, job_id: str, steps: int = 7000, frames: int = 180) -> str:
+        self.submitted.append((job_id, steps, frames))
         return f"fc-{job_id}"
 
     def submit_object(self, job_id: str, prompt: str, seed: int = 0, **kwargs) -> str:
@@ -127,8 +127,9 @@ def setup(tmp_path: Path):
 
 def test_create_uploads_inputs_and_spawns(setup) -> None:
     store, client, _clock, mgr, upload = setup
-    job = mgr.create(upload, steps=500)
-    assert client.submitted == [(job.job_id, 500)]
+    job = mgr.create(upload, steps=500, frames=250)
+    assert client.submitted == [(job.job_id, 500, 250)]
+    assert job.params == {"steps": 500}  # photos: frame count does not apply
     assert job.status == "queued" and job.call_id == f"fc-{job.job_id}"
     inputs = sorted((store.root / "jobs" / job.job_id / "input").iterdir())
     assert len(inputs) == 20 and inputs[0].name == "000_f000.jpg"

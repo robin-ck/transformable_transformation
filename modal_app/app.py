@@ -165,7 +165,7 @@ def gpu_probe(job_id: str = "spike") -> dict:
 
 
 @app.function(gpu=TRAIN_GPU, cpu=CPU_CORES, timeout=TRAIN_TIMEOUT_S, secrets=[hf_secret], retries=0)
-def reconstruct(job_id: str, steps: int = 7000) -> dict:
+def reconstruct(job_id: str, steps: int = 7000, frames: int = 180) -> dict:
     """Download inputs from the HF dataset, reconstruct, upload scene + run log."""
     from huggingface_hub import HfApi, snapshot_download
 
@@ -192,6 +192,7 @@ def reconstruct(job_id: str, steps: int = 7000) -> dict:
                 tmp_path / "work",
                 Path(GSPLAT_DIR),
                 steps=steps,
+                target_frames=frames,
                 on_stage=log.stage,
             )
             for local, name in [(result.ply, "scene.ply"), (result.splat, "scene.splat")]:
