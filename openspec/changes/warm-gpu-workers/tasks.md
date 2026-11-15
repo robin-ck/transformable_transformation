@@ -3,7 +3,7 @@
 Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now (no shared files). Task 2.3 and 4.2 wait until the redesign is merged: they edit `space/app.py` and the README, and need its Scene tab and tool sub-tabs.
 
 ## Status
-0.1 done (baseline below). Group 1 needs a Modal token to deploy and test.
+0.1 done (baseline below). Group 1 written and unit-tested except 1.3, which needs a deploy (Modal token). Owner of the warm object and preview classes: this change; `speed-up-edit-jobs` group 3 keeps `SceneEditor` only.
 
 ## 0. Baseline
 - [x] 0.1 Run `python scripts/job_timings.py`; record cold start (`start_wait_s`) and stage times of recent object and preview jobs in this file
@@ -16,12 +16,18 @@ Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now 
   - Overlap: `speed-up-edit-jobs` group 3 (on `main`) also turns preview and object jobs into warm Modal classes. Decide which change owns that work before starting group 1.
 
 ## 1. Load once per container
-- [ ] 1.1 Bump `modal>=1.0`; confirm `@modal.cls`, `@modal.enter`, `scaledown_window`, `max_containers` against the installed version
-- [ ] 1.2 `ObjectGenerator` class: models in `@modal.enter`, `generate()` method; drop prefetch thread and `del flux`
+- [x] 1.1 Bump `modal>=1.0`; confirm `@modal.cls`, `@modal.enter`, `scaledown_window`, `max_containers` against the installed version
+  - Checked on modal 1.6.4: `App.cls` takes `scaledown_window`, `max_containers`; `modal.enter`, `modal.method`, `Cls.from_name` exist. The app loads locally and registers both classes.
+- [x] 1.2 `ObjectGenerator` class: models in `@modal.enter`, `generate()` method; drop prefetch thread and `del flux`
+  - If loading fails in `enter`, the container stays up and the next job loads again, so a gated-model error still reaches the user as today.
 - [ ] 1.3 Check GPU memory with FLUX + TRELLIS resident; apply fallbacks from design.md if needed
-- [ ] 1.4 `PreviewRenderer` class: SDXL + ControlNet in `@modal.enter`, `render()` method
-- [ ] 1.5 `RunLog`: `warm` flag; load stages only on the loading call
-- [ ] 1.6 `modal_client`: submit via class methods; unit tests with a fake client stay green
+  - Prepared: `run.json` of object jobs now has `gpu_mem_peak_gb` and `gpu_mem_total_gb`. Needs one deployed run.
+- [x] 1.4 `PreviewRenderer` class: SDXL + ControlNet in `@modal.enter`, `render()` method
+  - Added: `enter` also renders a 16-Gaussian scene to build gsplat's kernels (stage `compile_gsplat`), since 0.1 shows the first render, not model loading, dominates the preview.
+- [x] 1.5 `RunLog`: `warm` flag; load stages only on the loading call
+  - `LoadTimes` in `reconstruction/cost.py`; `warm` is `None` for plain functions.
+- [x] 1.6 `modal_client`: submit via class methods; unit tests with a fake client stay green
+  - `spawn_method(class, method, ...)`; tests in `tests/test_reconstruction.py`. ruff + pytest: 120 passed.
 
 ## 2. Pre-warm
 - [ ] 2.1 `warm()` method on both classes; `modal_client.warm(kind)`

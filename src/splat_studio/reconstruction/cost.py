@@ -36,6 +36,7 @@ class RunLog:
     est_cost_usd: float = 0.0
     status: str = "running"
     error: dict[str, str] | None = None
+    warm: bool | None = None  # None: a plain function; else whether the models were loaded
 
     def stage(self, name: str, seconds: float) -> None:
         self.stages[name] = round(seconds, 1)
@@ -48,3 +49,22 @@ class RunLog:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class LoadTimes:
+    """Model load stages of a warm container (`@modal.enter`), reported once.
+
+    The first job after a load gets the load stages and `warm=False`; later jobs in the same
+    container get no load stages and `warm=True`.
+    """
+
+    def __init__(self) -> None:
+        self.pending: dict[str, float] = {}
+
+    def record(self, name: str, seconds: float) -> None:
+        self.pending[name] = round(seconds, 1)
+
+    def apply(self, log: RunLog) -> None:
+        log.warm = not self.pending
+        log.stages = {**self.pending, **log.stages}
+        self.pending = {}

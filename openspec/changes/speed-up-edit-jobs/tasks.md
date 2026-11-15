@@ -27,13 +27,14 @@ MVP task 5.3 (object merge on Modal) should use `scene_cache` once task 2 is don
 - [ ] 2.4 Measure an edit on v3, then an edit on the version it produced. The second job shows a cache hit and no download stage time.
 
 ## 3. Warm containers
-- [ ] 3.1 Turn `render_preview` into `Previewer`:
+Decided 2026-11-15: `warm-gpu-workers` owns the object and preview classes (`ObjectGenerator`, `PreviewRenderer`, done there in group 1). Here only `SceneEditor` (3.2) and its part of 3.4 remain.
+- [ ] 3.1 (moved to `warm-gpu-workers` 1.4) Turn `render_preview` into `Previewer`:
   - `@app.cls`, `scaledown_window=WARM_S` (300 s)
   - `@modal.enter` loads SDXL and the ControlNet
   - `run` keeps today's arguments and outputs
   - `models_volume.reload()` at the start of each job
 - [ ] 3.2 Turn `edit_scene` into `SceneEditor`. Split `Editor` into a load step (pipeline, scheduler) and a per-job prompt encoding.
-- [ ] 3.3 Turn `generate_object` into `ObjectMaker`. Measure GPU memory with FLUX and TRELLIS both loaded. If they do not fit, keep both in CPU RAM (`memory` 64 GB) and move each to the GPU for its step. Load them one after the other in `enter`.
+- [ ] 3.3 (moved to `warm-gpu-workers` 1.2, 1.3) Turn `generate_object` into `ObjectMaker`. Measure GPU memory with FLUX and TRELLIS both loaded. If they do not fit, keep both in CPU RAM (`memory` 64 GB) and move each to the GPU for its step. Load them one after the other in `enter`.
 - [ ] 3.4 `modal_client`:
   - add a class form of `spawn`
   - `submit_preview`, `submit_edit` and `submit_object` call the class methods

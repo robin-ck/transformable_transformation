@@ -180,6 +180,59 @@ def test_modal_client_spawn_and_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     assert modal_client.poll("done") == ("finished", {"status": "done"})
 
 
+def test_modal_client_class_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    from splat_studio import modal_client
+
+    calls = []
+
+    class Method:
+        def __init__(self, cls: str, name: str) -> None:
+            self.cls, self.name = cls, name
+
+        def spawn(self, *args, **kwargs):
+            calls.append((self.cls, self.name, args, kwargs))
+            return types.SimpleNamespace(object_id="fc-9")
+
+    def from_name(app: str, cls: str):
+        assert app == modal_client.APP_NAME
+        return lambda: types.SimpleNamespace(
+            generate=Method(cls, "generate"), render=Method(cls, "render")
+        )
+
+    monkeypatch.setitem(
+        sys.modules, "modal", types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=from_name))
+    )
+    assert modal_client.submit_object("j1", "oak", seed=2) == "fc-9"
+    assert modal_client.submit_preview("j2", "scenes/s/v1", {"fov": 50}, "warm light") == "fc-9"
+    assert calls == [
+        ("ObjectGenerator", "generate", ("j1", "oak"), {"seed": 2}),
+        (
+            "PreviewRenderer",
+            "render",
+            ("j2", "scenes/s/v1", {"fov": 50}, "warm light"),
+            {"seed": 0, "strength": 0.7},
+        ),
+    ]
+
+
+def test_load_times_reported_once() -> None:
+    from splat_studio.reconstruction.cost import LoadTimes, RunLog
+
+    loads = LoadTimes()
+    loads.record("load_image_model", 20.44)
+    first = RunLog(job_id="a", gpu="L40S")
+    first.stage("x", 1.0)
+    loads.apply(first)
+    assert first.warm is False
+    assert list(first.stages) == ["load_image_model", "x"]
+    assert first.stages["load_image_model"] == 20.4
+
+    second = RunLog(job_id="b", gpu="L40S")
+    loads.apply(second)
+    assert second.warm is True and second.stages == {}
+    assert RunLog(job_id="c", gpu="L4").to_dict()["warm"] is None
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 def test_extract_frames_real_video(tmp_path: Path) -> None:
     video = tmp_path / "v.mp4"
