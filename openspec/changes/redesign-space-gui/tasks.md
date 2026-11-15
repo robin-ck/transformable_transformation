@@ -7,7 +7,7 @@ If MVP task 5.3 (object merge on Modal) is done first or in parallel, keep the s
 ## 1. Layout
 - [x] 1.1 Split `build()` into New scene and Scene tabs; viewer left, tool sub-tabs (History, Add object, Preview, Edit scene) right; downloads under the viewer
 - [x] 1.2 Pick the start tab on load (Scene if a finished scene exists, opened at its newest version)
-- [x] 1.3 Finished-job notice (`gr.Info`) for reconstructions and scene edits; "Open newest scene" button; a finished edit offers its new version
+- [x] 1.3 Finished-job notice (`gr.Info`) for reconstructions and scene edits; open a scene by picking it in the "Finished scene" list (the "Open newest scene" button was dropped); a finished edit offers its new version
 - [ ] 1.4 Check locally: switching tools keeps scene, version, camera, a running placement and a running edit's progress line
 
 ## 2. Version history
@@ -62,3 +62,23 @@ If MVP task 5.3 (object merge on Modal) is done first or in parallel, keep the s
   running or failed edits stay in the prompt log accordion under it, not in the table.
 - 1.3: reconstructions get a toast; a finished edit shows it in the status line and opens its
   version (if its scene is shown and no object is being placed), with a toast.
+
+## 6. Objects and edits tables (2026-11-15)
+- [x] 6.1 Objects sub-tab: one table (Object, Status, Action) for placed objects (Hide/Show,
+  click to move or resize) and objects generated for the scene (Add); replaces the show/hide
+  checkboxes and the "Generated objects" dropdown
+- [x] 6.2 Move a placed object: `add_object.move_object` cuts its Gaussians out and merges its
+  generated file again at the new placement, as a new version (mode `move_object`); object
+  entries keep their placement (older entries take it from the version that added them)
+- [x] 6.3 Edit scene sub-tab: table of all edits (running, failed, done); one shown at a time
+- [x] 6.5 Hide/Show for edits the open version builds on: `versions.view_splat` shows the
+  edit's parent plus the objects placed after it (view only); checked in Chromium
+- [x] 6.4 Checked in Chromium against a local scene with two objects: hide, add, cancel, move
+  and save (v4 with the bench moved, the oak unchanged)
+
+Notes: Gradio 5 maps a js hook's return values onto the non-State inputs only, so a State
+in the middle shifted the values after it. This broke Preview and Edit scene (the prompt
+arrived as None) and "Place" (sliders shifted). All hooked events now list States last.
+Sliders in a hidden group have no value in the browser, so the objects table reads the
+placement from the viewer instead. A table click can fire `select` twice: Hide/Show follow
+the clicked label and a repeated Add is ignored.
