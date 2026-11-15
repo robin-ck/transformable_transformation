@@ -12,6 +12,8 @@ Preview jobs (task 4.3) live under `previews/<job_id>/` with `render.png`, `dept
 and `preview.png`; they never write to `scenes/`. Edit jobs (task 4.4) live under
 `edits/<job_id>/` with before/after renders; the worker itself saves the edited scene
 as the next version under `scenes/`, and its run log names it (`version`).
+Image jobs (Image editing tab) live under `images/<job_id>/` with `result.png`; an
+uploaded input image goes to `images/<job_id>/input/source.<ext>`.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ TRAIN_TIMEOUT_S = 60 * 60  # keep in sync with modal_app/app.py
 OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
 EDIT_TIMEOUT_S = 30 * 60  # keep in sync with modal_app/app.py
+IMAGE_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
 
 
 class Store(Protocol):
@@ -291,6 +294,40 @@ class JobManager:
             ),
         )
 
+    def create_image(
+        self,
+        prompt: str,
+        seed: int = 0,
+        source: Path | None = None,
+        strength: float = 0.7,
+        aspect: float = 1.0,
+    ) -> Job:
+        """Record an image job and start it on Modal: text-to-image, or image-to-image
+        when `source` is given (uploaded to `<prefix>/<job_id>/input/`)."""
+        now = self.clock()
+        job = Job(new_job_id(now), "image", " ".join(prompt.split())[:80], now)
+        job.params = {"prompt": prompt, "seed": seed, "mode": "text",
+                      "model": models.TEXT_TO_IMAGE.label}  # fmt: skip
+        source_path = None
+        if source is not None:
+            source_path = f"{self.prefix}/{job.job_id}/input/source{source.suffix.lower()}"
+            self.store.upload_files({source_path: source}, f"Input image for {job.job_id}")
+            job.params.update(mode="image", source_path=source_path, strength=strength)
+        else:
+            job.params["aspect"] = aspect
+        self._save(job)
+        return self._start(
+            job,
+            lambda: self.client.submit_image(
+                job.job_id,
+                prompt,
+                seed=seed,
+                source_path=source_path,
+                strength=strength,
+                aspect=aspect,
+            ),  # fmt: skip
+        )
+
     def get(self, job_id: str) -> Job | None:
         data = self.store.read_json(f"{self.prefix}/{job_id}/job.json")
         return Job.from_dict(data) if data else None
@@ -315,6 +352,7 @@ class JobManager:
                 "object": errors.object_failed,
                 "preview": errors.preview_failed,
                 "edit": errors.edit_failed,
+                "image": errors.image_failed,
             }.get(job.kind, errors.training_failed)
             if run and run.get("status") in FINAL:
                 self._apply_result(job, run)

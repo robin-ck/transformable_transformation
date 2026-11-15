@@ -100,7 +100,7 @@ Then add the four secrets (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `HF_TOKEN`, `
 
 ### Using the Space
 
-The page has two tabs. It opens on **Scene** when a finished scene exists (at its newest version), otherwise on **New scene**.
+The page has three tabs. It opens on **Scene** when a finished scene exists (at its newest version), otherwise on **New scene**.
 
 - **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; "Open newest scene" in the Scene tab opens it.
 - **Scene:** pick a scene; the viewer is on the left, the tools on the right. Switching tools keeps the scene, version, camera and any object being placed.
@@ -108,6 +108,7 @@ The page has two tabs. It opens on **Scene** when a finished scene exists (at it
   - **Add object:** describe an object, or upload a photo of it (PNG, JPG or WebP up to 20 MB; the text then only names it), and generate it (a few minutes). Photos of one object on a plain background work best. Then click the scene to put its base on that spot, drag it to move it, Shift-drag to turn it, or use the sliders (they follow the viewer). "Show object" hides it while you look around. "Place in new version" saves a new version; "Cancel" saves nothing.
   - **Edit scene:** aim the camera, write an instruction (e.g. "make the table green") and start the edit; about 10 minutes later the result is a new version, saved even if you close the page. The edit is strongest around the current view. Tick "Limit to a region" and drag a box in the viewer to change only that part (recommended for single objects).
   - **Preview:** aim the camera, describe a look, and get a restyled 2D image of that view. The scene is not changed.
+- **Image editing:** 2D images with FLUX.1-schnell, no scene needed. "Text to image" makes a picture from a prompt in the chosen format; "Text + image to image" changes an uploaded image towards the prompt ("Change" sets how far: low keeps more of the input). A result takes under a minute on a warm GPU; "Use result as input" continues editing it, and "Earlier images" lists past results. Files are stored under `images/<job_id>/` in the dataset.
 - **Objects shown** (under the viewer, for versions made with Add object): untick an object to hide it in the viewer. This changes only the view; downloads always contain every object. Versions made before object tracking have no such controls.
 
 ## Licence
