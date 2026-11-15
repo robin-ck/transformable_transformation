@@ -736,7 +736,13 @@ def build() -> gr.Blocks:
             # --- Scene: viewer left, tools right ------------------------------------
             with gr.Tab("Scene", id="scene"):
                 with gr.Row(equal_height=True):
-                    picker = gr.Dropdown(label="Finished scene", choices=[], value=None, scale=4)
+                    picker = gr.Dropdown(
+                        label="Finished scene",
+                        choices=[],
+                        value=None,
+                        scale=4,
+                        allow_custom_value=True,  # choices are filled in after load
+                    )
                     open_newest = gr.Button("Open newest scene", scale=1)
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=3):
