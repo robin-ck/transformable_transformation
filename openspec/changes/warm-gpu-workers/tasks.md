@@ -39,7 +39,7 @@ Runs alongside `redesign-space-gui`. Groups 0, 1 and task 2.1-2.2 can start now 
 ## 3. Check
 - [ ] 3.1 Deploy; cold job, then warm job: compare with the baseline (`scripts/job_timings.py`)
   - Object, 2026-11-15 (L40S, local Space): cold `20261115-130233-5da883` click to finish 149.5 s (start wait 129.2, job 18.6); warm `20261115-130551-2ae3be` ("put a pizza onto the table") 16.3 s (start wait 0.1, job 14.6: image 2.3, gaussians 7.8, simplify 1.1, upload 3.0), `warm: true`. Baseline 148.4 s. Warm meets the 30 s target; cold is unchanged, so pre-warm (group 2) matters.
-  - Preview: open.
+  - Preview: skipped for now (2026-11-15); run two back to back later to check `compile_gsplat` in `enter`.
 - [ ] 3.2 Open scene, wait 1 min, add "a mature oak tree": done in under 30 s?
 - [ ] 3.3 If over 30 s: note which stage dominates and propose next step (faster GPU, fewer TRELLIS steps, smaller image)
 
