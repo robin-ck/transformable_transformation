@@ -31,22 +31,23 @@ gsplat_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0")
     .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
-    .pip_install(
-        f"gsplat=={GSPLAT_VERSION}",
-        extra_index_url="https://docs.gsplat.studio/whl/pt24cu124",
-    )
-    # fused-ssim's setup.py imports torch, so it must build without isolation
-    # (isolated build envs can't see the torch installed above). The build
-    # container has no GPU, so the CUDA arch is set explicitly: 8.6 = A10G.
+    # gsplat and fused-ssim are built here with their CUDA kernels. Otherwise gsplat
+    # compiles them on its first call in every new container (75 to 118 s per preview).
+    # setup.py imports torch, so builds run without isolation (isolated build envs can't
+    # see the torch installed above). The build container has no GPU, so the CUDA archs
+    # are set explicitly: 8.6 = A10G, 8.9 = L4 and L40S.
     # Modal's add_python interpreter was built with clang, so extensions would
     # look for clang++; point them at the image's gcc instead.
     .apt_install("build-essential")
-    .pip_install("setuptools", "wheel")
-    .env({"TORCH_CUDA_ARCH_LIST": "8.6", "CC": "gcc", "CXX": "g++"})
+    .pip_install("setuptools", "wheel", "ninja")
+    .env({"TORCH_CUDA_ARCH_LIST": "8.6;8.9", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "8"})
     .run_commands(
-        f"git clone --depth 1 --branch v{GSPLAT_VERSION} "
+        f"git clone --recursive --depth 1 --shallow-submodules --branch v{GSPLAT_VERSION} "
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
+        f"pip install --no-build-isolation {GSPLAT_DIR}",
         f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
+        # Fails the build if the kernels were not compiled in (JIT would kick in again).
+        'python -c "from gsplat import csrc"',
     )
 )
 image = gsplat_image.add_local_python_source("splat_studio")
@@ -658,7 +659,8 @@ class PreviewRenderer:
 
         self.loads.record("imports", time.time() - t)
 
-        # gsplat builds its CUDA kernels on the first call; do it here on a tiny scene.
+        # The kernels ship in the image (gsplat_image); a tiny render here still loads
+        # them and sets up CUDA before the first job.
         t = time.time()
         n = 16
         with torch.no_grad():

@@ -7,12 +7,13 @@ MVP task 5.3 (object merge on Modal) should use `scene_cache` once task 2 is don
 
 ## 1. gsplat kernels in the image
 - [ ] 1.1 Add a GPU probe `check_gsplat` (T4 or L4, a few cents): in a fresh container, time `import gsplat` and the first `rasterization` call on a small random scene. Run it on today's image and record the baseline. A first call near 70 s confirms the JIT compile.
-- [ ] 1.2 Build gsplat from `/opt/gsplat` with its CUDA kernels:
+- [x] 1.2 Build gsplat from `/opt/gsplat` with its CUDA kernels:
   - `git clone --recursive`
   - `pip install --no-build-isolation`
   - `TORCH_CUDA_ARCH_LIST="8.6;8.9"`
   - drop the wheel-index install
   - end the build step with a `from gsplat import csrc` check
+  - Done 2026-11-15 in `gsplat_image` (also `ninja`, `MAX_JOBS=8`, shallow submodules). Not yet deployed: the image build and 1.3 need a Modal token.
 - [ ] 1.3 Rerun `check_gsplat`: the first call takes < 5 s. Run `check_edit_image` too, and a short `reconstruct` on the test job (500 steps) to confirm training still runs.
 - [ ] 1.4 Run one preview on the real scene and record the stage times.
 
