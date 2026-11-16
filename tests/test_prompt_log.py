@@ -40,6 +40,26 @@ def test_scene_log_lists_versions_and_previews_newest_first() -> None:
     assert len(rows[0]) == len(prompt_log.COLUMNS)
 
 
+def test_preview_rows_list_only_this_scene_newest_first_with_ids() -> None:
+    previews = [
+        _preview("p1", "scenes/s1/v2", 2.5 * DAY),
+        _preview("p2", "scenes/other/v1", 4 * DAY),  # another scene: left out
+        _preview("p3", "scenes/s1/v3", 5 * DAY, status="queued"),
+        _preview("p4", "scenes/s1/vX", 6 * DAY),  # odd path: left out
+        _preview("p5", "scenes/s1/v1", 3 * DAY, status="failed"),
+    ]
+    other = Job("o1", "edit", "green", 7 * DAY)
+    other.params = {"scene_path": "scenes/s1/v3"}  # not a preview: left out
+    rows, ids = prompt_log.preview_rows("s1", [*previews, other])
+    assert ids == ["p3", "p5", "p1"]
+    assert [r[1] for r in rows] == ["v3", "v1", "v2"]
+    assert rows[0][2] == "same street in autumn"
+    assert rows[0][3] == prompt_log.PREVIEW_STATUS["queued"]
+    assert rows[2][0].startswith("1970-01-03")
+    assert all(len(r) == len(prompt_log.PREVIEW_COLUMNS) for r in rows)
+    assert prompt_log.preview_rows("none", previews) == ([], [])
+
+
 def test_history_of_version_3_shows_prompt_and_model_of_each_step() -> None:
     md = prompt_log.history_markdown(_versions(), 3)
     assert md.startswith("**History of v3**")

@@ -919,19 +919,19 @@ def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
     )
 
 
-def on_preview_tick(preview_job: str | None):
-    """Poll the preview job. Outputs: status, preview_job, column, preview, render."""
+def _preview_outputs(job: Job | None, notify: bool = True) -> list:
+    """Outputs for a preview's current state: status, preview_job, column, preview, render.
+
+    `preview_job` is cleared once the job is final; while it runs it is left unchanged.
+    """
     rest = [gr.skip()] * 3
-    if not preview_job:
-        return [gr.skip(), gr.skip(), *rest]
-    job = PREVIEWS.get(preview_job)
-    job = PREVIEWS.refresh(job) if job else None
     if job is None:
         return ["The preview job was not found.", None, *rest]
     if job.status == "failed":
         err = job.error or {}
         msg = f"❌ **Preview failed.** {err.get('message', '')} {err.get('tip', '')}".strip()
-        gr.Warning(f"Preview failed. {err.get('message', '')}".strip())
+        if notify:
+            gr.Warning(f"Preview failed. {err.get('message', '')}".strip())
         return [msg, None, *rest]
     if job.status != "done":
         label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
@@ -946,7 +946,8 @@ def on_preview_tick(preview_job: str | None):
         return ["**The preview image is missing.**", None, *rest]
     seconds = job.run.get("seconds")
     took = f" in {format_elapsed(seconds)}" if seconds else ""
-    gr.Info("Preview ready: see the Preview tab.")
+    if notify:
+        gr.Info("Preview ready: see the Preview tab.")
     return [
         f"✅ Preview of **{job.summary}** ready{took}. The scene is unchanged.",
         None,
@@ -954,6 +955,47 @@ def on_preview_tick(preview_job: str | None):
         str(styled),
         str(render) if render else None,
     ]
+
+
+def on_preview_tick(preview_job: str | None):
+    """Poll the preview job. Outputs: status, preview_job, column, preview, render."""
+    if not preview_job:
+        return [gr.skip()] * 5
+    job = PREVIEWS.get(preview_job)
+    return _preview_outputs(PREVIEWS.refresh(job) if job else None)
+
+
+def _scene_previews(scene_id: str | None) -> list[Job]:
+    """The scene's previews, newest first; unfinished ones are updated from Modal, so a
+    preview that finished after its page was closed shows as done (reopen-previews)."""
+    if not scene_id:
+        return []
+    jobs = prompt_log.scene_previews(scene_id, PREVIEWS.list(refresh=False))
+    return [PREVIEWS.refresh(j) if j.status not in ("done", "failed") else j for j in jobs]
+
+
+def on_previews(scene_id: str | None):
+    """The Preview sub-tab's list of earlier previews. Outputs: table, row job ids."""
+    rows, ids = prompt_log.preview_rows(scene_id or "", _scene_previews(scene_id))
+    return gr.update(value=rows), ids
+
+
+def on_pick_preview(ids: list[str] | None, evt: gr.SelectData):
+    """A click on an earlier preview: show a finished one, follow a running one.
+
+    Outputs: status, preview_job, column, preview, render.
+    """
+    row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    if not ids or not 0 <= row < len(ids):
+        return [gr.skip()] * 5
+    job = PREVIEWS.get(ids[row])
+    job = PREVIEWS.refresh(job) if job else None
+    out = _preview_outputs(job, notify=False)
+    if job is not None and job.status != "done":
+        out[2] = gr.update(visible=False)  # the images shown belong to another preview
+    if job is not None and job.status not in ("done", "failed"):
+        out[1] = job.job_id  # the 5 s poll follows it from here
+    return out
 
 
 # --- Image editing tab ----------------------------------------------------------------
@@ -1133,7 +1175,8 @@ button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); 
 button:disabled { cursor: progress !important; }
 #placement-bridge, #camera-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
-#history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr { cursor: pointer; }
+#history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr,
+#previews-table tbody tr { cursor: pointer; }
 #objects-table td:last-child, #edits-table td:last-child { font-weight: 600; white-space: nowrap; }
 """
 
@@ -1284,7 +1327,7 @@ def build() -> gr.Blocks:
                                     ed_seed = gr.Number(label="Seed", value=0, precision=0)
                                     ed_go = gr.Button("Edit scene", variant="primary")
                                 ed_status = gr.Markdown()
-                            with gr.Tab("Preview"):
+                            with gr.Tab("Preview") as pv_tab:
                                 gr.Markdown(
                                     "Restyle the current view as a 2D image. Aim the camera "
                                     "first; the scene is not changed."
@@ -1308,6 +1351,12 @@ def build() -> gr.Blocks:
                                     render_img = gr.Image(
                                         label="Rendered view it started from", interactive=False
                                     )
+                                pv_table = gr.Dataframe(
+                                    headers=prompt_log.PREVIEW_COLUMNS, interactive=False,
+                                    wrap=True, type="array", elem_id="previews-table",
+                                    label="Earlier previews of this scene (click one to show it)",
+                                )  # fmt: skip
+                                pv_ids = gr.State([])
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
@@ -1364,6 +1413,8 @@ def build() -> gr.Blocks:
         end = [place_group, placing, obj_job, moving]
         scene_outputs = [version, hidden, viewer, download, shown, history_table, *end]
         log = (log_outputs, [picker, version], [history, log_table])
+        # Earlier previews; runs before `log`, so the prompt log reads their updated status.
+        pv_list = (on_previews, picker, [pv_table, pv_ids])
         lib = (
             on_tables, [picker, version, hidden, moving],
             [objects_table, obj_keys, edits_table, edit_numbers],
@@ -1376,10 +1427,12 @@ def build() -> gr.Blocks:
 
         # Start tab, finished-job notice, opening scenes and versions
         demo.load(on_load, [obj_job, placing], [tabs, table, picker, seen, *scene_outputs]).then(
+            *pv_list
+        ).then(*log).then(*lib)
+        gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
+        picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*pv_list).then(
             *log
         ).then(*lib)
-        gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
-        picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*log).then(*lib)
         history_table.select(
             on_pick_row, [picker, history_table, obj_job, placing], scene_outputs
         ).then(*log).then(*lib)
@@ -1483,6 +1536,15 @@ def build() -> gr.Blocks:
         )
         # A started or finished preview adds a line to the prompt log.
         pv_status.change(*log)
+        # Earlier previews (reopen-previews): the list follows starts and finishes, and a
+        # click shows a finished preview or follows a running one.
+        preview_job.change(*pv_list)
+        pv_tab.select(*pv_list)
+        pv_table.select(
+            on_pick_preview,
+            pv_ids,
+            [pv_status, preview_job, preview_col, preview_img, render_img],
+        )
 
         # Image editing
         mode_outputs = [im_source, im_aspect, im_strength, im_keep]

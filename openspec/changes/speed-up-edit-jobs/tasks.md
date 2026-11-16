@@ -61,6 +61,7 @@ Decided 2026-11-15: `warm-gpu-workers` owns the object and preview classes (`Obj
 - [ ] 5.1 Run the chosen Edit scene settings on an L40S (`with_options(gpu="L40S")`) and compare time and cost with the A10G.
 - [ ] 5.2 Switch `EDIT_GPU` only if the L40S is at least 1.5 times faster. Keep the timeouts in `space/jobs.py` in sync.
 - [ ] 5.3 Preview GPU: if the L4 queued for more than 1 min in 3.5, move `PREVIEW_GPU` to A10G.
+  - 2026-11-16: handled in `reopen-previews` (2.1, 2.2) as a fallback list instead: `PREVIEW_GPUS = ["L4", "A10G", "L40S"]`. Previews from the Space waited 4 to 41 min for an L4 (start waits 227 to 2487 s on 2026-11-15 and 16). Deployed as v16 on 2026-11-16; the first preview after it (cold, L4) took 37.8 s from click to finish, `warm_gsplat` 1.0 s instead of `compile_gsplat` 120 s.
 
 ## 6. Wrap-up
 - [x] 6.1 ruff + pytest pass (152 passed after rebasing on main, 2026-11-15)

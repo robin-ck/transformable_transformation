@@ -121,8 +121,10 @@ object_image = (
 
 # Preview (task 4.3): gsplat renders the viewer's view (colour + depth), SDXL img2img with
 # a depth ControlNet restyles it. Reuses the gsplat build; SDXL + ControlNet in fp16 need
-# about 10 GB, so an L4 (24 GB) is enough.
-PREVIEW_GPU = "L4"
+# about 10 GB, so an L4 (24 GB) is enough. Preview takes the first of these GPUs that is
+# free instead of waiting for an L4: on 2026-11-15 and 16 previews waited 4 to 41 min for
+# one (reopen-previews). The image's gsplat kernels cover all three (arch 8.6 and 8.9).
+PREVIEW_GPUS = ["L4", "A10G", "L40S"]
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with splat_studio/space/jobs.py
 # Edit scene (task 4.4) uses the same image: gsplat for training, diffusers for IP2P.
 EDIT_GPU = "A10G"
@@ -733,7 +735,7 @@ VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of 
 
 @app.cls(
     image=preview_image,
-    gpu=PREVIEW_GPU,
+    gpu=PREVIEW_GPUS,
     timeout=PREVIEW_TIMEOUT_S,
     secrets=[hf_secret],
     volumes={MODELS_DIR: models_volume},
@@ -815,12 +817,13 @@ class PreviewRenderer:
         from splat_studio import models
         from splat_studio.editing import preview
         from splat_studio.reconstruction import errors
-        from splat_studio.reconstruction.cost import RunLog
+        from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
 
         repo = os.environ["SPLAT_STUDIO_DATASET"]
         api = HfApi()
         prefix = f"previews/{job_id}"
-        log = RunLog(job_id=job_id, gpu=PREVIEW_GPU)
+        gpu = gpu_from_device_name(torch.cuda.get_device_name(0), PREVIEW_GPUS[0])
+        log = RunLog(job_id=job_id, gpu=gpu)
         _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
         model_label = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
 
