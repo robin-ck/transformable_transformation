@@ -97,6 +97,40 @@ def scene_log(
     return sorted(entries, key=lambda e: e.created_at or 0, reverse=True)
 
 
+PREVIEW_COLUMNS = ["Date", "Version", "Prompt", "Status"]
+PREVIEW_STATUS = {
+    "queued": "⏳ waiting for a GPU",
+    "running": "⚙️ running",
+    "done": "✅ done",
+    "failed": "❌ failed",
+}
+
+
+def scene_previews(scene_id: str, previews: list[Job]) -> list[Job]:
+    """The previews made from any version of one scene, newest first (reopen-previews)."""
+    mine = [
+        j for j in previews
+        if j.kind == "preview"
+        and _version_number(j.params.get("scene_path"), scene_id) is not None
+    ]  # fmt: skip
+    return sorted(mine, key=lambda j: j.created_at or 0, reverse=True)
+
+
+def preview_rows(scene_id: str, previews: list[Job]) -> tuple[list[list[str]], list[str]]:
+    """Rows for the Preview sub-tab's list (`PREVIEW_COLUMNS`) and the job id of each row."""
+    jobs = scene_previews(scene_id, previews)
+    rows = [
+        [
+            _date(j.created_at),
+            f"v{_version_number(j.params.get('scene_path'), scene_id)}",
+            j.params.get("prompt") or j.summary,
+            PREVIEW_STATUS.get(j.status, j.status),
+        ]
+        for j in jobs
+    ]
+    return rows, [j.job_id for j in jobs]
+
+
 def lineage(versions: list[Version], number: int) -> list[Version]:
     """The chain of versions that led to `number`, oldest first (follows `parent`)."""
     by_number = {v.number: v for v in versions}

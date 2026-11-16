@@ -23,6 +23,18 @@ def estimate_cost(gpu: str, seconds: float, cpu_cores: float = 0.0) -> float:
     return round(seconds * (GPU_USD_PER_SECOND[gpu] + cpu_cores * CPU_CORE_USD_PER_SECOND), 4)
 
 
+def gpu_from_device_name(name: str, default: str) -> str:
+    """Price key for a CUDA device name such as "NVIDIA L40S"; `default` if unknown.
+
+    For functions with a list of GPU types, where the container may get any of them.
+    """
+    upper = name.upper()
+    for key in sorted(GPU_USD_PER_SECOND, key=len, reverse=True):  # L40S before L4
+        if key in upper:
+            return key
+    return default
+
+
 @dataclass
 class RunLog:
     """Per-job record: stage timings, total runtime, estimated cost and outcome."""

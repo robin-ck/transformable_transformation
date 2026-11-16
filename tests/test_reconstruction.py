@@ -116,6 +116,14 @@ def test_estimate_cost() -> None:
         cost.estimate_cost("TPU", 1)
 
 
+def test_gpu_from_device_name() -> None:
+    assert cost.gpu_from_device_name("NVIDIA L40S", "L4") == "L40S"
+    assert cost.gpu_from_device_name("NVIDIA L4", "A10G") == "L4"
+    assert cost.gpu_from_device_name("NVIDIA A10G", "L4") == "A10G"
+    assert cost.gpu_from_device_name("NVIDIA A100-SXM4-40GB", "L4") == "A100"
+    assert cost.gpu_from_device_name("Some new card", "L4") == "L4"
+
+
 def test_runlog_finish_records_cost_and_error() -> None:
     log = cost.RunLog(job_id="j", gpu="A10G", started_at=0)
     log.stage("poses", 12.34)
