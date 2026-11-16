@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from splat_studio import modal_client, models
 from splat_studio.editing.scene_edit import check_budget
 from splat_studio.reconstruction import errors
+from splat_studio.reconstruction import settings as scene_settings
 
 from .validation import ValidUpload
 
@@ -220,14 +221,20 @@ class JobManager:
             ).to_dict()
         return self._save(job)
 
-    def create(self, upload: ValidUpload, steps: int = 7000) -> Job:
-        """Upload inputs, record the job, start the Modal reconstruction."""
+    def create(self, upload: ValidUpload, settings: dict | None = None) -> Job:
+        """Upload inputs, record the job, start the Modal reconstruction.
+
+        `settings` (`reconstruction.settings.LIMITS`) are checked first, also against the
+        time limit; raises ValueError before anything is uploaded.
+        """
+        used = scene_settings.check_settings(settings)
+        scene_settings.check_time(used, len(upload.files) if upload.kind == "photos" else None)
         now = self.clock()
-        job = Job(new_job_id(now), upload.kind, upload.summary, now)
+        job = Job(new_job_id(now), upload.kind, upload.summary, now, params=used)
         files = {f"jobs/{job.job_id}/input/{i:03d}_{p.name}": p for i, p in enumerate(upload.files)}
         self.store.upload_files(files, f"Inputs for job {job.job_id}")
         self._save(job)
-        return self._start(job, lambda: self.client.submit_reconstruction(job.job_id, steps=steps))
+        return self._start(job, lambda: self.client.submit_reconstruction(job.job_id, used))
 
     def create_object(
         self,

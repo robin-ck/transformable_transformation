@@ -33,6 +33,7 @@ from splat_studio.editing.scene_edit import (  # noqa: E402
     preset_of,
     region_from_viewer,
 )
+from splat_studio.reconstruction import settings as scene_settings  # noqa: E402
 from splat_studio.space import prompt_log  # noqa: E402
 from splat_studio.space.add_object import (  # noqa: E402
     EDIT_COLUMNS,
@@ -104,17 +105,36 @@ STATUS_LABEL = {
     "done": "✅ done",
     "failed": "❌ failed",
 }
-COLUMNS = ["Job", "Input", "Status", "Elapsed", "Details"]
+COLUMNS = ["Job", "Input", "Settings", "Status", "Elapsed", "Details"]
 
 
 def on_upload(files: list[str] | None):
+    """Check the upload; also returns the number of photos (None for a video or nothing),
+    which the estimate uses instead of the frames setting."""
     if not files:
-        return gr.update(value=HELP), gr.update(interactive=False)
+        return gr.update(value=HELP), gr.update(interactive=False), None
     try:
         upload = validate_upload(files)
     except UploadError as e:
-        return gr.update(value=f"**Upload rejected.** {e}"), gr.update(interactive=False)
-    return gr.update(value=f"**Ready.** {upload.summary}"), gr.update(interactive=True)
+        return gr.update(value=f"**Upload rejected.** {e}"), gr.update(interactive=False), None
+    photos = len(upload.files) if upload.kind == "photos" else None
+    return gr.update(value=f"**Ready.** {upload.summary}"), gr.update(interactive=True), photos
+
+
+def settings_label(job: Job) -> str:
+    """Jobs table: the scene settings a job ran with; empty for jobs from before them."""
+    p = job.params
+    if not all(k in p for k in SCENE_KEYS):
+        return ""
+    parts = [f"{p['steps']:,} steps"]
+    if job.kind == "video":
+        parts.append(f"{p['frames']} frames")
+    parts.append(f"{p['max_side']:,} px")
+    try:
+        name = scene_settings.preset_of({k: p[k] for k in SCENE_KEYS})
+    except ValueError:
+        name = None
+    return f"{name or CUSTOM}: " + " · ".join(parts)
 
 
 def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
@@ -128,10 +148,78 @@ def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
         else:
             details = ""
         rows.append(
-            [j.job_id, j.summary, STATUS_LABEL.get(j.status, j.status),
+            [j.job_id, j.summary, settings_label(j), STATUS_LABEL.get(j.status, j.status),
              format_elapsed(j.elapsed(now)), details]
         )  # fmt: skip
     return rows
+
+
+# --- new scene settings (scene-settings) --------------------------------------------
+
+SCENE_KEYS = list(scene_settings.LIMITS)  # steps, frames, max_side
+SCENE_SLIDERS = {  # label, slider step, hint
+    "steps": (
+        "Training steps",
+        500,
+        "More steps give a sharper scene. About 5 s per 100 steps at 1,600 px, "
+        "and more after 7,000 steps, as the scene keeps growing until 15,000.",
+    ),
+    "frames": (
+        "Frames from the video",
+        10,
+        "Video only; a photo set uses every photo. More frames cover more views, but "
+        "finding the camera positions (the longest part of the job) gets slower.",
+    ),
+    "max_side": (
+        "Max image size (px)",
+        100,
+        "Long side of the training images, for video frames and photos. Smaller trains "
+        "faster but gives a blurrier scene.",
+    ),
+}
+STAGE_NAMES = {"frames": "frames", "poses": "camera positions", "training": "training",
+               "saving": "saving"}  # fmt: skip
+
+
+def scene_estimate(photos, steps, frames, max_side) -> str:
+    """Markdown: rough GPU time and cost of a new scene, with the parts that make it up."""
+    settings = dict(zip(SCENE_KEYS, (steps, frames, max_side), strict=True))
+    try:
+        parts = scene_settings.estimate_breakdown(settings, photos)
+        scene_settings.check_time(settings, photos)
+    except ValueError as e:
+        return f"⚠️ {e}"
+    total = sum(parts.values())
+    detail = ", ".join(f"{STAGE_NAMES[k]} {_minutes(v)}" for k, v in parts.items() if v)
+    note = (
+        " Photo sets are not measured yet and may take longer: every photo is matched "
+        "with every other."
+        if photos
+        else ""
+    )
+    return (
+        f"⏱️ Up to about **{_minutes(total)}** on the GPU ({detail}), up to about "
+        f"${scene_settings.estimate_usd(total):.2f}, plus any wait for a free GPU. Based on "
+        "the slowest of three Standard video runs, which took 10 to 15 min; training takes "
+        f"longer for scenes that grow more Gaussians.{note}"
+    )
+
+
+def on_scene_preset(name, photos):
+    """Preset picked: set the sliders to it and update the estimate."""
+    if name not in scene_settings.PRESETS:
+        return [gr.skip()] * len(SCENE_KEYS) + [gr.skip()]
+    values = [scene_settings.PRESETS[name][k] for k in SCENE_KEYS]
+    return [*values, scene_estimate(photos, *values)]
+
+
+def on_scene_slider(photos, *values):
+    """A slider moved: show the matching preset (or Custom) and update the estimate."""
+    try:
+        name = scene_settings.preset_of(dict(zip(SCENE_KEYS, values, strict=True))) or CUSTOM
+    except ValueError:
+        name = CUSTOM
+    return name, scene_estimate(photos, *values)
 
 
 def scene_choices(jobs: list[Job]) -> list[tuple[str, str]]:
@@ -1143,12 +1231,16 @@ def on_download(job_id: str | None, number: int | None, kind: str):
     return gr.update(value=str(path), visible=True)
 
 
-def on_create(files: list[str] | None):
+def on_create(files: list[str] | None, steps, frames, max_side):
     try:
         upload = validate_upload(files)
     except UploadError as e:
         return f"**Upload rejected.** {e}", jobs_table()
-    job = JOBS.create(upload)
+    settings = dict(zip(SCENE_KEYS, (steps, frames, max_side), strict=True))
+    try:
+        job = JOBS.create(upload, settings)
+    except ValueError as e:
+        return f"**Not started.** {e}", jobs_table()
     if job.status == "failed":
         return (
             f"**Could not start the job.** {job.error['message']} {job.error.get('tip', '')}",
@@ -1192,6 +1284,7 @@ def build() -> gr.Blocks:
         obj_keys, edit_numbers = gr.State([]), gr.State([])
         preview_job, edit_job, image_job = gr.State(None), gr.State(None), gr.State(None)
         image_paths = gr.State([])
+        n_photos = gr.State(None)  # photos in the current upload; None for a video
 
         with gr.Tabs(selected="new") as tabs:
             # --- New scene: upload, create, jobs -----------------------------------
@@ -1202,6 +1295,28 @@ def build() -> gr.Blocks:
                     file_types=[".mp4", ".mov", ".jpg", ".jpeg", ".png"],
                 )
                 message = gr.Markdown(HELP)
+                sc_default = scene_settings.PRESETS[scene_settings.DEFAULT_PRESET]
+                sc_preset = gr.Radio(
+                    [*scene_settings.PRESETS, CUSTOM],
+                    value=scene_settings.DEFAULT_PRESET,
+                    label="Speed and quality",
+                    info="Standard is what every scene used so far. Fast and High are not "
+                    "yet measured or compared for quality.",
+                )
+                with gr.Accordion("Scene settings", open=False):
+                    sc_settings = [
+                        gr.Slider(
+                            *scene_settings.LIMITS[k],
+                            value=sc_default[k],
+                            step=SCENE_SLIDERS[k][1],
+                            label=SCENE_SLIDERS[k][0],
+                            info=SCENE_SLIDERS[k][2],
+                        )
+                        for k in SCENE_KEYS
+                    ]
+                sc_estimate = gr.Markdown(
+                    scene_estimate(None, *(sc_default[k] for k in SCENE_KEYS))
+                )
                 create = gr.Button("Create scene", variant="primary", interactive=False)
                 gr.Markdown("## Jobs")
                 table = gr.Dataframe(headers=COLUMNS, interactive=False, wrap=True)
@@ -1421,8 +1536,18 @@ def build() -> gr.Blocks:
         )  # fmt: skip
 
         # New scene
-        files.change(on_upload, files, [message, create])
-        clicked(create, "⏳ Starting…", on_create, files, [message, table])
+        sc_quick = {"queue": False, "show_progress": "hidden"}
+        files.change(on_upload, files, [message, create, n_photos]).then(
+            scene_estimate, [n_photos, *sc_settings], sc_estimate, **sc_quick
+        )
+        sc_preset.input(
+            on_scene_preset, [sc_preset, n_photos], [*sc_settings, sc_estimate], **sc_quick
+        )
+        for slider in sc_settings:
+            slider.input(
+                on_scene_slider, [n_photos, *sc_settings], [sc_preset, sc_estimate], **sc_quick
+            )
+        clicked(create, "⏳ Starting…", on_create, [files, *sc_settings], [message, table])
         clicked(refresh, "⏳ Refreshing…", refresh_all, picker, [table, picker])
 
         # Start tab, finished-job notice, opening scenes and versions

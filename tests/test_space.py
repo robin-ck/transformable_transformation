@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from splat_studio import modal_client
+from splat_studio.reconstruction import settings as scene_settings
 from splat_studio.space import jobs, validation, versions, viewer
 from splat_studio.space.validation import UploadError, validate_upload
 
@@ -94,8 +95,8 @@ class FakeClient:
         self.submitted: list[tuple[str, int]] = []
         self.results: dict[str, object] = {}  # call_id -> result dict or exception
 
-    def submit_reconstruction(self, job_id: str, steps: int = 7000) -> str:
-        self.submitted.append((job_id, steps))
+    def submit_reconstruction(self, job_id: str, settings: dict | None = None) -> str:
+        self.submitted.append((job_id, settings))
         return f"fc-{job_id}"
 
     def submit_object(self, job_id: str, prompt: str, seed: int = 0, **kwargs) -> str:
@@ -127,8 +128,10 @@ def setup(tmp_path: Path):
 
 def test_create_uploads_inputs_and_spawns(setup) -> None:
     store, client, _clock, mgr, upload = setup
-    job = mgr.create(upload, steps=500)
-    assert client.submitted == [(job.job_id, 500)]
+    job = mgr.create(upload, {"steps": 3000})
+    used = {**scene_settings.PRESETS["Standard"], "steps": 3000}
+    assert client.submitted == [(job.job_id, used)]
+    assert job.params == used  # recorded in job.json
     assert job.status == "queued" and job.call_id == f"fc-{job.job_id}"
     inputs = sorted((store.root / "jobs" / job.job_id / "input").iterdir())
     assert len(inputs) == 20 and inputs[0].name == "000_f000.jpg"
@@ -184,6 +187,24 @@ def test_spawn_failure_is_reported(setup) -> None:
     client.submit_reconstruction = boom
     job = mgr.create(upload)
     assert job.status == "failed" and job.error["code"] == "start_failed"
+
+
+def test_create_defaults_to_standard(setup) -> None:
+    _store, client, _clock, mgr, upload = setup
+    job = mgr.create(upload)
+    assert client.submitted == [(job.job_id, scene_settings.PRESETS["Standard"])]
+
+
+@pytest.mark.parametrize(
+    "settings, match",
+    [({"steps": 500}, "between 1000 and 30000"), ({"steps": 30000}, "limit for one scene")],
+)
+def test_create_refuses_bad_settings_before_upload(setup, settings, match) -> None:
+    store, client, _clock, mgr, _upload = setup
+    photos = validate_upload(_files(store.root.parent / "many", 300))
+    with pytest.raises(ValueError, match=match):
+        mgr.create(photos, settings)
+    assert client.submitted == [] and not (store.root / "jobs").exists()
 
 
 def test_list_newest_first(setup) -> None:

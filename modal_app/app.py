@@ -23,7 +23,7 @@ import modal
 APP_NAME = "splat-studio"
 GSPLAT_VERSION = "1.5.3"  # pin; check https://github.com/nerfstudio-project/gsplat/releases
 GSPLAT_DIR = "/opt/gsplat"
-TRAIN_GPU = "A10G"
+TRAIN_GPU = "A10G"  # with CPU_CORES: keep in sync with splat_studio/reconstruction/settings.py
 TRAIN_TIMEOUT_S = 60 * 60  # hard cap per job to protect the monthly credit
 CPU_CORES = 4.0
 
@@ -247,8 +247,12 @@ def gpu_probe(job_id: str = "spike") -> dict:
 
 
 @app.function(gpu=TRAIN_GPU, cpu=CPU_CORES, timeout=TRAIN_TIMEOUT_S, secrets=[hf_secret], retries=0)
-def reconstruct(job_id: str, steps: int = 7000) -> dict:
-    """Download inputs from the HF dataset, reconstruct, upload scene + run log."""
+def reconstruct(job_id: str, settings: dict | None = None) -> dict:
+    """Download inputs from the HF dataset, reconstruct, upload scene + run log.
+
+    `settings` (`reconstruction.settings.LIMITS`: steps, frames, max_side) override the
+    default preset; the pipeline checks them before any work.
+    """
     from huggingface_hub import HfApi, snapshot_download
 
     from splat_studio.reconstruction import pipeline
@@ -273,7 +277,7 @@ def reconstruct(job_id: str, steps: int = 7000) -> dict:
                 tmp_path / "dl" / "jobs" / job_id / "input",
                 tmp_path / "work",
                 Path(GSPLAT_DIR),
-                steps=steps,
+                settings=settings,
                 on_stage=log.stage,
             )
             for local, name in [(result.ply, "scene.ply"), (result.splat, "scene.splat")]:
@@ -289,6 +293,7 @@ def reconstruct(job_id: str, steps: int = 7000) -> dict:
                 "scene_path": f"scenes/{job_id}/v1",
                 "num_gaussians": result.num_gaussians,
                 "num_frames": result.num_frames,
+                "settings": result.settings,
             }
         except ReconstructionError as e:
             out = log.finish("failed", e.to_dict()).to_dict()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -10,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import colmap, errors, export, frames
+from . import settings as scene_settings
 
 VIDEO_EXT = {".mp4", ".mov"}
 PHOTO_EXT = {".jpg", ".jpeg", ".png"}
 MIN_FRAMES = 20
-DEFAULT_STEPS = 7000  # gsplat default is 30k; 7k keeps cost low for v1
 
 
 @dataclass
@@ -23,6 +22,7 @@ class Result:
     splat: Path
     num_gaussians: int
     num_frames: int
+    settings: dict[str, int]
 
 
 def classify_inputs(input_dir: Path) -> tuple[str, list[Path]]:
@@ -60,10 +60,14 @@ def run(
     input_dir: Path,
     work_dir: Path,
     gsplat_dir: Path,
-    steps: int = DEFAULT_STEPS,
+    settings: dict | None = None,
     on_stage: Callable[[str, float], None] | None = None,
 ) -> Result:
-    """Frames -> poses -> training -> export. Raises ReconstructionError on failure."""
+    """Frames -> poses -> training -> export. Raises ReconstructionError on failure.
+
+    `settings` (`reconstruction.settings.LIMITS`) are checked before any work; missing
+    keys take the default preset.
+    """
 
     def timed(name: str, fn: Callable):
         t = time.time()
@@ -73,16 +77,24 @@ def run(
         return out
 
     kind, files = classify_inputs(input_dir)
+    photos = len(files) if kind == "photos" else None
+    if photos is not None and photos < MIN_FRAMES:
+        raise errors.too_few_frames(photos, MIN_FRAMES)
+    try:
+        s = scene_settings.check_settings(settings)
+        scene_settings.check_time(s, photos)
+    except ValueError as e:
+        raise errors.bad_settings(str(e)) from e
     data_dir = work_dir / "data"
     images = data_dir / "images"
     images.mkdir(parents=True, exist_ok=True)
 
-    if kind == "video":
-        n = timed("frames", lambda: frames.extract_frames(files[0], images))
-    else:
-        for i, p in enumerate(files):
-            shutil.copy(p, images / f"{i:05d}{p.suffix.lower()}")
-        n = len(files)
+    def prepare_images() -> int:
+        if kind == "video":
+            return frames.extract_frames(files[0], images, s["frames"], s["max_side"])
+        return frames.copy_photos(files, images, s["max_side"])
+
+    n = timed("frames", prepare_images)
     if n < MIN_FRAMES:
         raise errors.too_few_frames(n, MIN_FRAMES)
 
@@ -92,7 +104,9 @@ def run(
     res = timed(
         "train",
         lambda: subprocess.run(
-            train_command(gsplat_dir, data_dir, result_dir, steps), capture_output=True, text=True
+            train_command(gsplat_dir, data_dir, result_dir, s["steps"]),
+            capture_output=True,
+            text=True,
         ),
     )
     if res.returncode != 0:
@@ -101,4 +115,4 @@ def run(
 
     splat = work_dir / "scene.splat"
     count = timed("export", lambda: export.ply_to_splat(ply, splat))
-    return Result(ply=ply, splat=splat, num_gaussians=count, num_frames=n)
+    return Result(ply=ply, splat=splat, num_gaussians=count, num_frames=n, settings=s)

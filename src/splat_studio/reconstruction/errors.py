@@ -39,6 +39,14 @@ def too_few_frames(n: int, minimum: int) -> ReconstructionError:
     )
 
 
+def bad_settings(reason: str) -> ReconstructionError:
+    return ReconstructionError(
+        "bad_settings",
+        f"The scene settings were not accepted: {reason}",
+        "Tip: pick a preset (Fast, Standard or High) and try again.",
+    )
+
+
 def no_poses(detail: str = "") -> ReconstructionError:
     return ReconstructionError(
         "pose_failed",
