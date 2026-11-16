@@ -45,8 +45,9 @@ def poll(call_id: str) -> tuple[str, dict | None]:
         return "running", None
 
 
-def submit_reconstruction(job_id: str, steps: int = 7000) -> str:
-    return spawn("reconstruct", job_id, steps=steps)
+def submit_reconstruction(job_id: str, settings: dict | None = None) -> str:
+    """`settings` override the default preset (`reconstruction.settings.LIMITS`)."""
+    return spawn("reconstruct", job_id, settings=settings)
 
 
 def submit_object(

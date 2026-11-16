@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from splat_studio.reconstruction import colmap, cost, errors, export, frames, pipeline
+from splat_studio.reconstruction import settings as scene_settings
 
 # --- frames -------------------------------------------------------------------
 
@@ -29,7 +30,90 @@ def test_sample_fps_rejects_bad_input() -> None:
 def test_ffmpeg_command_has_fps_and_pattern(tmp_path: Path) -> None:
     cmd = frames.ffmpeg_command(Path("in.mp4"), tmp_path, 2.0)
     assert "fps=2.0000" in cmd[cmd.index("-vf") + 1]
+    assert "min(1600,iw)" in cmd[cmd.index("-vf") + 1]
     assert cmd[-1].endswith("%05d.jpg")
+    small = frames.ffmpeg_command(Path("in.mp4"), tmp_path, 2.0, max_long_side=1200)
+    assert "min(1200,iw)" in small[small.index("-vf") + 1]
+
+
+def test_copy_photos_scales_large_ones_and_keeps_exif(tmp_path: Path) -> None:
+    from PIL import Image
+
+    src = tmp_path / "src"
+    src.mkdir()
+    exif = Image.Exif()
+    exif[0x010F] = "TestCam"  # Make
+    Image.new("RGB", (4000, 3000), "red").save(src / "big.JPG", exif=exif)
+    Image.new("RGB", (1000, 2000), "blue").save(src / "tall.png")
+    Image.new("RGB", (800, 600), "green").save(src / "small.jpg")
+    photos = [src / "big.JPG", src / "tall.png", src / "small.jpg"]
+    out = tmp_path / "images"
+    assert frames.copy_photos(photos, out, max_long_side=1600) == 3
+    with Image.open(out / "00000.jpg") as im:
+        assert im.size == (1600, 1200) and im.getexif()[0x010F] == "TestCam"
+    with Image.open(out / "00001.png") as im:
+        assert im.size == (800, 1600)
+    assert (out / "00002.jpg").read_bytes() == (src / "small.jpg").read_bytes()  # untouched
+
+
+# --- scene settings (scene-settings) ----------------------------------------------
+
+
+def test_scene_settings_default_and_overrides() -> None:
+    assert scene_settings.check_settings(None) == {"steps": 7000, "frames": 180, "max_side": 1600}
+    assert scene_settings.check_settings({"steps": 3000.0})["steps"] == 3000
+    for bad, match in [
+        ({"steps": 999}, "between"),
+        ({"frames": 301}, "between"),
+        ({"max_side": 2000}, "between"),
+        ({"steps": 1500.5}, "whole number"),
+        ({"steps": True}, "whole number"),
+        ({"sh_degree": 3}, "unknown"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            scene_settings.check_settings(bad)
+
+
+def test_scene_presets_are_valid_and_named() -> None:
+    for name, preset in scene_settings.PRESETS.items():
+        assert scene_settings.check_settings(preset) == preset
+        assert scene_settings.preset_of(preset) == name
+        scene_settings.check_time(preset)  # every preset fits the time limit
+    assert scene_settings.preset_of({"steps": 7500}) is None
+
+
+def test_scene_estimate_bounds_the_measured_runs() -> None:
+    # three Standard runs took 589, 629 and 866 s (the slowest about $0.31)
+    standard = scene_settings.estimate_seconds(None)
+    assert 866 <= standard < 950
+    assert 0.28 < scene_settings.estimate_usd(standard) < 0.34
+    est = {n: scene_settings.estimate_seconds(p) for n, p in scene_settings.PRESETS.items()}
+    assert est["Fast"] < est["Standard"] < est["High"]
+
+
+def test_scene_estimate_uses_photo_count() -> None:
+    video = scene_settings.estimate_breakdown({"frames": 60})
+    photos = scene_settings.estimate_breakdown({"frames": 60}, photos=300)
+    assert photos["frames"] == 0 and photos["poses"] > video["poses"]
+
+
+def test_scene_time_limit() -> None:
+    longest = {"steps": 30000, "frames": 300, "max_side": 1600}
+    with pytest.raises(ValueError, match="lower the frames"):
+        scene_settings.check_time(longest)
+    with pytest.raises(ValueError, match="upload fewer photos"):
+        scene_settings.check_time(longest, photos=300)
+    assert scene_settings.check_time({"steps": 30000, "max_side": 1200}) < scene_settings.MAX_S
+
+
+def test_pipeline_refuses_bad_settings_before_work(tmp_path: Path) -> None:
+    inp = tmp_path / "in"
+    inp.mkdir()
+    (inp / "v.mp4").touch()
+    with pytest.raises(errors.ReconstructionError) as e:
+        pipeline.run(inp, tmp_path / "work", tmp_path, settings={"steps": 30000, "frames": 300})
+    assert e.value.code == "bad_settings" and "limit" in e.value.message
+    assert not (tmp_path / "work").exists()
 
 
 # --- colmap -------------------------------------------------------------------
