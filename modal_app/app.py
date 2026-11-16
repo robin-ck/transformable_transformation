@@ -426,6 +426,7 @@ class ObjectGenerator:
         from splat_studio import models
         from splat_studio.editing.objects import normalise_object
         from splat_studio.editing.simplify import simplify
+        from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog
         from splat_studio.reconstruction.export import read_ply, to_splat_bytes, write_ply
@@ -490,29 +491,25 @@ class ObjectGenerator:
                 (tmp_path / "object.splat").write_bytes(to_splat_bytes(obj))
                 log.stage("simplify", time.time() - t)
 
-                t = time.time()
-                for name in ["object.ply", "object.splat", "reference.png"]:
-                    api.upload_file(
-                        path_or_fileobj=str(tmp_path / name),
-                        path_in_repo=f"{prefix}/{name}",
-                        repo_id=repo,
-                        repo_type="dataset",
-                    )
-                log.stage("upload", time.time() - t)
-            log.finish("done")
-            result = {
-                **log.to_dict(),
-                "scene_path": prefix,
-                "num_gaussians": len(obj),
-                "raw_gaussians": len(raw_gaussians),
-                "model": model_label,
-                "prompt": prompt,
-                "seed": seed,
-                "gpu_mem_peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 1),
-                "gpu_mem_total_gb": round(
-                    torch.cuda.get_device_properties(0).total_memory / 2**30, 1
-                ),
-            }
+                info = {
+                    "scene_path": prefix,
+                    "num_gaussians": len(obj),
+                    "raw_gaussians": len(raw_gaussians),
+                    "model": model_label,
+                    "prompt": prompt,
+                    "seed": seed,
+                    "gpu_mem_peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 1),
+                    "gpu_mem_total_gb": round(
+                        torch.cuda.get_device_properties(0).total_memory / 2**30, 1
+                    ),
+                }
+                files = {
+                    f"{prefix}/{name}": tmp_path / name
+                    for name in ["object.ply", "object.splat", "reference.png"]
+                }
+                result = finish_with_outputs(
+                    api, repo, prefix, log, files, info, f"Object {job_id}"
+                )
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
@@ -522,7 +519,8 @@ class ObjectGenerator:
             err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
             result = log.finish("failed", err.to_dict()).to_dict()
 
-        _upload_json(api, repo, f"{prefix}/run.json", result)
+        if result["status"] != "done":  # a done run.json went in with the object
+            _upload_json(api, repo, f"{prefix}/run.json", result)
         print(json.dumps(result))
         return result
 
@@ -596,6 +594,7 @@ class SceneEditor:
         from splat_studio import models
         from splat_studio.editing import edit_worker, scene_edit
         from splat_studio.editing.preview import ViewCamera
+        from splat_studio.hub_outputs import commit_files
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog
         from splat_studio.scene_cache import SceneCache
@@ -646,11 +645,12 @@ class SceneEditor:
                 t = time.time()
                 # The edited scene goes to edits/<job>/ first, so a failure while saving
                 # the version below does not lose the training result.
-                for name, path in [("before.png", res.before), ("after.png", res.after),
-                                   ("edit_example.png", res.example), ("scene.ply", res.ply),
-                                   ("scene.splat", res.splat)]:  # fmt: skip
-                    api.upload_file(path_or_fileobj=str(path), path_in_repo=f"{prefix}/{name}",
-                                    repo_id=repo, repo_type="dataset")  # fmt: skip
+                outputs = {"before.png": res.before, "after.png": res.after,
+                           "edit_example.png": res.example, "scene.ply": res.ply,
+                           "scene.splat": res.splat}  # fmt: skip
+                commit_files(
+                    api, repo, {f"{prefix}/{n}": p for n, p in outputs.items()}, f"Edit {job_id}"
+                )
                 store = HubStore(repo, os.environ.get("HF_TOKEN"), cache_dir=Path(tmp) / "cache")
                 used = {k: getattr(settings, k) for k in scene_edit.BUDGET_LIMITS}
                 version = add_version(
@@ -821,6 +821,7 @@ class PreviewRenderer:
 
         from splat_studio import models
         from splat_studio.editing import preview
+        from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
 
@@ -895,21 +896,7 @@ class PreviewRenderer:
             ).images[0]
             log.stage("restyle", time.time() - t)
 
-            t = time.time()
-            with tempfile.TemporaryDirectory() as tmp:
-                images = {"render.png": render, "depth.png": control, "preview.png": styled}
-                for name, img in images.items():
-                    img.save(Path(tmp) / name)
-                    api.upload_file(
-                        path_or_fileobj=str(Path(tmp) / name),
-                        path_in_repo=f"{prefix}/{name}",
-                        repo_id=repo,
-                        repo_type="dataset",
-                    )
-            log.stage("upload", time.time() - t)
-            log.finish("done")
-            result = {
-                **log.to_dict(),
+            info = {
                 "scene_path": prefix,
                 "source_scene": scene_path,
                 "model": model_label,
@@ -922,6 +909,14 @@ class PreviewRenderer:
                 "num_gaussians": len(g),
                 "scene_cached": cached,
             }
+            with tempfile.TemporaryDirectory() as tmp:
+                images = {"render.png": render, "depth.png": control, "preview.png": styled}
+                for name, img in images.items():
+                    img.save(Path(tmp) / name)
+                files = {f"{prefix}/{name}": Path(tmp) / name for name in images}
+                result = finish_with_outputs(
+                    api, repo, prefix, log, files, info, f"Preview {job_id}"
+                )
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
@@ -931,7 +926,8 @@ class PreviewRenderer:
             err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
             result = log.finish("failed", err.to_dict()).to_dict()
 
-        _upload_json(api, repo, f"{prefix}/run.json", result)
+        if result["status"] != "done":  # a done run.json went in with the images
+            _upload_json(api, repo, f"{prefix}/run.json", result)
         print(json.dumps(result))
         return result
 
@@ -1007,6 +1003,7 @@ class ImageStudio:
 
         from splat_studio import models
         from splat_studio.editing import images
+        from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog
 
@@ -1055,20 +1052,7 @@ class ImageStudio:
                 ).images[0]
             log.stage("image", time.time() - t)
 
-            t = time.time()
-            with tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "result.png"
-                result.save(out)
-                api.upload_file(
-                    path_or_fileobj=str(out),
-                    path_in_repo=f"{prefix}/result.png",
-                    repo_id=repo,
-                    repo_type="dataset",
-                )
-            log.stage("upload", time.time() - t)
-            log.finish("done")
-            result_info = {
-                **log.to_dict(),
+            info = {
                 "scene_path": prefix,
                 "model": models.TEXT_TO_IMAGE.label,
                 "mode": "image" if source_path else "text",
@@ -1078,7 +1062,13 @@ class ImageStudio:
                 "size": [width, height],
             }
             if source_path:
-                result_info.update(source_path=source_path, strength=strength)
+                info.update(source_path=source_path, strength=strength)
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "result.png"
+                result.save(out)
+                result_info = finish_with_outputs(
+                    api, repo, prefix, log, {f"{prefix}/result.png": out}, info, f"Image {job_id}"
+                )
         except errors.ReconstructionError as e:
             result_info = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
@@ -1088,6 +1078,7 @@ class ImageStudio:
             err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
             result_info = log.finish("failed", err.to_dict()).to_dict()
 
-        _upload_json(api, repo, f"{prefix}/run.json", result_info)
+        if result_info["status"] != "done":  # a done run.json went in with the image
+            _upload_json(api, repo, f"{prefix}/run.json", result_info)
         print(json.dumps(result_info))
         return result_info
