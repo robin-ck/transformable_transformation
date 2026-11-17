@@ -13,6 +13,10 @@ When the user names an object to change, the system SHALL detect that object in 
 - **WHEN** the user clicks that future in the gallery, or compares it with another
 - **THEN** its labelled detection image and detection list are shown with it
 
+#### Scenario: Detect before making a future
+- **WHEN** the scene's editor is Kontext, a saved view is selected, the user types "chairs" in "Object to change" and clicks Detect objects
+- **THEN** the labelled image of the view's plain render and its caption are shown, nothing is stored, and no future is made; if nothing matches, the message names the object
+
 #### Scenario: Older masked future
 - **WHEN** the user clicks a masked future made before this change
 - **THEN** its details list the detections from `run.json` and no labelled image is shown

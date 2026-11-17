@@ -1005,6 +1005,57 @@ class _ViewRestyler:
         return result
 
     @modal.method()
+    def detect(self, view_prefix: str, object_query: str) -> dict:
+        """Detect and segment `object_query` in a viewpoint's plain render, without editing
+        (add-detection-preview, "Detect objects"). Stores nothing.
+
+        Returns {"status", "mask" (as run.json's), "stages", "detections_jpeg"} or a failed
+        {"status", "error", "stages"} (`object_not_found` when nothing matches).
+        """
+        from splat_studio import models
+        from splat_studio.editing import annotate, masking
+        from splat_studio.reconstruction import errors
+
+        repo = os.environ["SPLAT_STUDIO_DATASET"]
+        stages: dict[str, float] = {}
+        query = " ".join((object_query or "").split())
+        try:
+            if self.editor is None:
+                self._load_models()
+            if self.masker is None:
+                name = models.editor_spec(self.EDITOR).name
+                raise errors.preview_failed(f"{name} cannot limit changes to an object")
+            if not query:
+                raise errors.preview_failed("no object named")
+            t = time.time()
+            view = self._stored_view(repo, view_prefix)
+            if view is None:
+                raise errors.preview_failed(f"viewpoint {view_prefix} has no stored render yet")
+            render = view[0]
+            stages["load_view"] = round(time.time() - t, 2)
+            t = time.time()
+            found = self.masker.detect(render, query)
+            stages["detect"] = round(time.time() - t, 2)
+            if not found:
+                raise errors.object_not_found(query)
+            t = time.time()
+            masks = self.masker.segment(render, found)
+            stages["segment"] = round(time.time() - t, 2)
+            t = time.time()
+            labelled = annotate.draw_detections(render, found, masks)
+            info = masking.mask_info(query, found, masks.any(0), False, self.masker.labels)
+            stages["annotate"] = round(time.time() - t, 2)
+            result = {"status": "done", "mask": info, "stages": stages,
+                      "detections_jpeg": _jpeg(labelled, 85)}  # fmt: skip
+        except errors.ReconstructionError as e:
+            result = {"status": "failed", "error": e.to_dict(), "stages": stages}
+        except Exception as e:
+            result = {"status": "failed", "error": errors.preview_failed(repr(e)).to_dict(),
+                      "stages": stages}  # fmt: skip
+        print(_printable(result))
+        return result
+
+    @modal.method()
     def render(
         self,
         job_id: str,

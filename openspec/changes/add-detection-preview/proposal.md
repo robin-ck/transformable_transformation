@@ -15,4 +15,5 @@ With "Object to change" (add-object-masking), the user only sees the blended "Ch
 - Storage: `previews/<job_id>/detections.jpg` for masked futures (about 150 kB). Older masked futures have none and show the list only.
 - Speed: one CPU drawing step (stage `annotate`), expected under 0.1 s.
 - Deploy: needs `modal deploy modal_app/app.py`.
-- Follow-up, not in this change: a "Detect only" button that shows the labelled image before Make future and lets the user untick detections.
+- Added after the first merge (PR #38): a **Detect objects** button next to "Object to change". It runs detection and segmentation only (no Kontext, nothing stored) on the selected view's plain render and shows the labelled image with its caption, so the user can check the matches before spending a Kontext run. New worker method `detect(view_prefix, object_query)`; a cold container still loads Kontext (about 90 s), a warm one answers in about 1 to 2 s.
+- Follow-up, not in this change: unticking detections before Make future.
