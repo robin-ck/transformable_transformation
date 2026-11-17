@@ -27,13 +27,30 @@ def test_sample_fps_rejects_bad_input() -> None:
         frames.sample_fps(0, 30)
 
 
-def test_ffmpeg_command_has_fps_and_pattern(tmp_path: Path) -> None:
-    cmd = frames.ffmpeg_command(Path("in.mp4"), tmp_path, 2.0)
-    assert "fps=2.0000" in cmd[cmd.index("-vf") + 1]
-    assert "min(1600,iw)" in cmd[cmd.index("-vf") + 1]
-    assert cmd[-1].endswith("%05d.jpg")
-    small = frames.ffmpeg_command(Path("in.mp4"), tmp_path, 2.0, max_long_side=1200)
-    assert "min(1200,iw)" in small[small.index("-vf") + 1]
+def test_candidates_command_has_fps_scale_and_score_stream(tmp_path: Path) -> None:
+    cmd = frames.candidates_command(Path("in.mp4"), tmp_path, 2.0)
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "fps=2.0000" in graph and "min(1600,iw)" in graph
+    assert f"scale={frames.SCORE_SIZE}:{frames.SCORE_SIZE}" in graph and "format=gray" in graph
+    assert str(tmp_path / "%05d.jpg") in cmd and cmd[-1] == "pipe:1"
+    small = frames.candidates_command(Path("in.mp4"), tmp_path, 2.0, max_long_side=1200)
+    assert "min(1200,iw)" in small[small.index("-filter_complex") + 1]
+
+
+def test_sharpness_is_lower_for_blurred_image() -> None:
+    rng = np.random.default_rng(0)
+    sharp = rng.integers(0, 256, (64, 64)).astype(np.uint8)
+    blurred = (sharp[:-1, :-1].astype(float) + sharp[1:, 1:] + sharp[1:, :-1] + sharp[:-1, 1:]) / 4
+    assert frames.sharpness(blurred) < frames.sharpness(sharp) / 2
+    assert frames.sharpness(np.full((8, 8), 7, np.uint8)) == 0
+
+
+def test_pick_sharpest_takes_best_in_each_window() -> None:
+    scores = [1, 5, 2, 9, 3, 4, 0, 0, 8]
+    assert frames.pick_sharpest(scores, 3) == [1, 3, 8]
+    assert frames.pick_sharpest(scores, 9) == list(range(9))
+    assert frames.pick_sharpest(scores, 20) == list(range(9))
+    assert frames.pick_sharpest([], 5) == []
 
 
 def test_copy_photos_scales_large_ones_and_keeps_exif(tmp_path: Path) -> None:
@@ -363,6 +380,35 @@ def test_extract_frames_real_video(tmp_path: Path) -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()  # fmt: skip
     assert out == "1600,800"
+    assert not [p for p in tmp_path.iterdir() if p.name not in {"v.mp4", "img"}]  # no leftovers
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_extract_frames_skips_blurred_frames(tmp_path: Path) -> None:
+    from PIL import Image
+
+    # 30 fps, only frames 0 and 1 of every 6 sharp; 20 frames from 4 s means 15 fps
+    # candidates in groups of 3 (6 source frames), each group holding one sharp frame.
+    video = tmp_path / "v.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30",
+         "-vf", "boxblur=8:enable='gte(mod(n,6),2)'", "-t", "4", str(video)],
+        check=True,
+    )  # fmt: skip
+    n = frames.extract_frames(video, tmp_path / "img", target_frames=20)
+    assert 18 <= n <= 22
+    ref = tmp_path / "sharp.jpg"  # frame 0 is sharp
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(video), "-frames:v", "1", "-q:v", "2", str(ref)],
+        check=True,
+    )  # fmt: skip
+
+    def score(f: Path) -> float:
+        with Image.open(f) as im:
+            return frames.sharpness(np.asarray(im.convert("L")))
+
+    sharp = score(ref)
+    assert all(score(f) > sharp / 2 for f in (tmp_path / "img").glob("*.jpg"))
 
 
 # --- colmap runner (fake subprocess) -------------------------------------------
