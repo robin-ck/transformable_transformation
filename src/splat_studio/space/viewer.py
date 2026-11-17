@@ -389,6 +389,10 @@ try {
     sharedMemoryForWorkers: false,
     useBuiltInControls: true,
     dynamicScene: !!cfg.object,  // the object moves after loading
+    // Draw only when the view changes (camera, resize, sort, load); the library's default
+    // redraws every frame, which keeps the client's GPU busy while nothing moves. A
+    // dynamic scene (placing an object) still draws every frame.
+    renderMode: GS.RenderMode.OnChange,
   });
   window.splatViewer = viewer;  // for debugging from the browser console
   msg.style.display = "none";  // the viewer shows its own loading progress
