@@ -91,7 +91,59 @@ class SdxlDepthEditor:
         ).images[0]
 
 
-_CLASSES = {"sdxl-depth": SdxlDepthEditor}
+class FluxKontextEditor:
+    """FLUX.1 Kontext dev: edits the image as the prompt instructs and keeps the rest.
+
+    Unlike SDXL img2img it needs no strength: an instruction such as "remove the chairs"
+    changes the chairs only. The depth image is not used; `strength` and `control_scale`
+    are accepted and ignored, so callers can pass the same options to every editor.
+    """
+
+    def __init__(self, spec: models.EditorSpec) -> None:
+        self.spec = spec
+        self.key, self.label = spec.key, spec.label
+        self.licence, self.uses_depth = spec.licence, spec.uses_depth
+        self.pipe = None
+
+    def load(self) -> None:
+        import torch
+        from diffusers import FluxKontextPipeline
+
+        (model,) = self.spec.models
+        self.pipe = FluxKontextPipeline.from_pretrained(
+            model.repo_id, revision=model.revision, torch_dtype=torch.bfloat16
+        ).to("cuda")
+
+    def restyle(
+        self,
+        image: Any,
+        depth: Any,
+        prompt: str,
+        seed: int,
+        *,
+        steps: int = 28,
+        guidance: float = 2.5,
+        **_: Any,
+    ) -> Any:
+        """Returns a PIL image the size of `image` (Kontext works near one megapixel)."""
+        import torch
+        from PIL import Image
+
+        if self.pipe is None:
+            self.load()
+        out = self.pipe(
+            image=image,
+            prompt=prompt.strip(),
+            guidance_scale=float(guidance),
+            num_inference_steps=int(steps),
+            generator=torch.Generator("cpu").manual_seed(int(seed)),
+        ).images[0]
+        if out.size != image.size:
+            out = out.resize(image.size, Image.LANCZOS)
+        return out
+
+
+_CLASSES = {"sdxl-depth": SdxlDepthEditor, "flux-kontext": FluxKontextEditor}
 
 
 def make_editor(key: str = models.DEFAULT_EDITOR) -> Editor:
