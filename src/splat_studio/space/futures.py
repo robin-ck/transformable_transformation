@@ -173,3 +173,22 @@ def data_url(path: Path) -> str:
     import base64
 
     return "data:image/jpeg;base64," + base64.b64encode(Path(path).read_bytes()).decode()
+
+
+def delete_future(index: FutureIndex, job_id: str) -> Job:
+    """Delete a finished future's folder (`previews/<job_id>/`) and forget it.
+
+    Running futures are refused (the worker would write the folder again). The image
+    stays in the dataset's git history, like a deleted scene. Futures built on it keep
+    their own image; their details still name it as the parent.
+    """
+    job = index.final.get(job_id) or index.manager.get(job_id)
+    if job is None or not is_future(job):
+        raise FutureError("This future was not found; refresh the gallery.")
+    if job.status not in FINAL:
+        raise FutureError("This future is still being made; delete it once it has finished.")
+    index.manager.store.delete_folders(
+        [f"{index.manager.prefix}/{job_id}"], f"Delete future {job_id}"
+    )
+    index.final.pop(job_id, None)
+    return job
