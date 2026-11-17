@@ -43,6 +43,8 @@
   - Thumbnails under `<file_dir>/thumbs/` (views and futures); a just-made future's thumbnail comes from the returned JPEG. Browser check: plain render, then "add people on th…", then "a wooden footbri…".
 - [x] 4.2 Compare: select two (or one and the plain render), show side by side with full prompt, starter and date
   - The last two tiles clicked are compared. The browser check found the two images stacked in the narrow tool panel (Gradio's column minimum width); fixed, now two 230 × 298 px images in one row.
+- [x] 4.3 Future in the viewer: clicking a gallery tile moves the viewer to its viewpoint and lays the future over the 3D view (fade slider, "Back to 3D"); the plain render tile and picking another view remove it
+  - Viewer messages `show_image` / `hide_image` (`viewer.py`); the image goes inline as a JPEG data URL (longer side 1280 px, cached under `thumbs/viewer/`), so no file route is needed. Its listener runs before the scene loads. Browser check (2026-11-17, local Space, Playwright, seeded scene with one view and two futures): tile → overlay with caption "bridge: flood park"; slider at 40 % showed the splats through it; "Back to 3D" hid it; the plain render tile hid it; the other future showed it. The control bar first sat under the viewer's help text; the overlay now sits above it.
 
 ## 5. Optional speed-up
 - [ ] 5.1 Compare 30 vs 20 restyle steps (and SDXL-Lightning if its licence fits) on four starters of one viewpoint; keep the cheapest that looks the same

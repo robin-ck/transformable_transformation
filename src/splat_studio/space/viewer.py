@@ -39,6 +39,11 @@ Viewpoints (add-viewpoint-futures): `{type: "set_camera", position: [x, y, z],
 target: [x, y, z]}` moves the camera there, looking at `target` (the orbit centre),
 without reloading the scene.
 
+Futures in the viewer: `{type: "show_image", src, caption}` lays an image (a future of
+the view the camera was just moved to) over the 3D view, with a slider that fades
+between it and the 3D view and a "Back to 3D" button; `{type: "hide_image"}` removes
+it. The overlay blocks orbiting, since the image only fits the saved camera.
+
 Last view: with a `view_key` (the scene id), the page keeps the camera position and
 orbit centre in the browser's localStorage after each move, and a scene opened
 without an explicit camera starts at that saved view. "Reset view" still goes to the
@@ -233,6 +238,18 @@ _PAGE = """<!doctype html>
     padding: 4px 10px; font-size: 12px; pointer-events: none; }
   #box { position: absolute; border: 2px dashed #ffb347; background: rgba(255,179,71,.15);
     display: none; pointer-events: none; }
+  #future { position: absolute; inset: 0; z-index: 11; display: none; touch-action: none; }
+  #future img { position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; background: rgba(31,36,48,.6); }
+  #future .ctl { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px; max-width: calc(100% - 20px);
+    background: rgba(20,24,32,.85); border: 1px solid #4a5263; border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; }
+  #future .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 40ch; }
+  #future input { width: 110px; }
+  #future button { background: #2b3242; color: #e6e9ef; border: 1px solid #4a5263;
+    border-radius: 6px; padding: 3px 8px; cursor: pointer; font: inherit; white-space: nowrap; }
   #msg { position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; text-align: center; padding: 16px; z-index: 5; }
 </style>
@@ -241,6 +258,10 @@ _PAGE = """<!doctype html>
 <div id="root"></div>
 <div id="msg">Loading scene…</div>
 <div id="area"><div class="hint">Drag a box over the part to edit</div><div id="box"></div></div>
+<div id="future"><img alt="Future of this view"><div class="ctl">
+  <span class="cap"></span><span>3D</span>
+  <input type="range" min="0" max="100" value="100" title="Fade between the 3D view and the future">
+  <span>future</span><button type="button">Back to 3D</button></div></div>
 <div id="bar"><button id="reset" title="Reset view (R)">Reset view</button></div>
 <div id="help">Drag: orbit · Right-drag / two fingers: pan · Wheel / pinch: zoom · R: reset</div>
 <div id="placehelp"></div>
@@ -249,6 +270,25 @@ const cfg = __CONFIG__;
 const msg = document.getElementById("msg");
 const root = document.getElementById("root");
 const tip = document.getElementById("placehelp");
+// Futures in the viewer (see the module docstring); works before the scene has loaded.
+{
+  const box = document.getElementById("future"), img = box.querySelector("img");
+  const fade = box.querySelector("input"), cap = box.querySelector(".cap");
+  const hide = () => { box.style.display = "none"; img.removeAttribute("src"); };
+  fade.addEventListener("input", () => { img.style.opacity = fade.value / 100; });
+  box.querySelector("button").addEventListener("click", hide);
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d || (d.type !== "show_image" && d.type !== "hide_image")) return;
+    if (d.type === "hide_image" || typeof d.src !== "string" || !d.src) { hide(); return; }
+    img.src = d.src;
+    cap.textContent = d.caption || "";
+    cap.title = d.caption || "";
+    fade.value = 100;
+    img.style.opacity = 1;
+    box.style.display = "block";
+  });
+}
 // Click handlers in order; each returns true if it used the click. Without one, the
 // viewer's own handler runs (it moves the orbit centre to the clicked splat).
 const clickHandlers = [];

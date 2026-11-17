@@ -169,3 +169,9 @@ def test_viewer_answers_camera_requests() -> None:
 def test_viewer_moves_its_camera_on_request() -> None:
     doc = viewer.viewer_document("/f.splat", viewer.Camera((0, -3, 1), (0, 0, 0)))
     assert '"set_camera"' in doc and "controls.target.set(...d.target)" in doc
+
+
+def test_viewer_lays_a_future_over_the_scene() -> None:
+    doc = viewer.viewer_document("/f.splat", viewer.Camera((0, -3, 1), (0, 0, 0)))
+    assert '"show_image"' in doc and '"hide_image"' in doc and 'id="future"' in doc
+    assert "Back to 3D" in doc and 'type="range"' in doc
