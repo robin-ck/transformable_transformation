@@ -78,3 +78,31 @@ def test_kontext_editor_runs_in_its_own_class_without_depth():
     editor = restyle.make_editor("flux-kontext")
     assert (editor.key, editor.uses_depth, editor.pipe) == ("flux-kontext", False, None)
     assert editor.label == "black-forest-labs/FLUX.1-Kontext-dev@24e9ded"
+
+
+def test_sdpa_shim_drops_false_gqa_and_refuses_true():
+    import types
+
+    from splat_studio.editing import restyle
+
+    calls = []
+
+    def old_sdpa(query, key, value, attn_mask=None, scale=None):  # torch 2.4 signature
+        calls.append((query, scale))
+        return "out"
+
+    f = types.SimpleNamespace(scaled_dot_product_attention=old_sdpa)
+    restyle.allow_sdpa_without_gqa(f)
+    restyle.allow_sdpa_without_gqa(f)  # wrapping twice is a no-op
+    assert f.scaled_dot_product_attention(query=1, key=2, value=3, scale=0.5,
+                                          enable_gqa=False) == "out"  # fmt: skip
+    assert calls == [(1, 0.5)]
+    with pytest.raises(NotImplementedError):
+        f.scaled_dot_product_attention(query=1, key=2, value=3, enable_gqa=True)
+
+    def new_sdpa(query, key, value, enable_gqa=False):
+        return "new"
+
+    g = types.SimpleNamespace(scaled_dot_product_attention=new_sdpa)
+    restyle.allow_sdpa_without_gqa(g)
+    assert g.scaled_dot_product_attention is new_sdpa
