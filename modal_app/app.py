@@ -31,15 +31,16 @@ CPU_CORES = 4.0
 # for Python 3.10; on 3.11 pip took PyPI's pure-Python wheel, which JIT-compiles the
 # kernels on the first render of every new container (70 to 90 s; speed-up-edit-jobs 1).
 # The build container has no GPU, so the CUDA archs are set explicitly:
-# 8.6 = A10G, 8.9 = L4 and L40S. Extensions without isolation see the torch installed
-# above. Modal's add_python interpreter was built with clang, so extensions would look
-# for clang++; point them at the image's gcc instead.
+# 8.0 = A100, 8.6 = A10G, 8.9 = L4 and L40S, 9.0 = H100. A GPU whose arch is missing
+# fails at the first render ("Failed to set maximum shared memory size"). Extensions
+# without isolation see the torch installed above. Modal's add_python interpreter was
+# built with clang, so extensions would look for clang++; point them at the image's gcc.
 gsplat_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0", "build-essential")
     .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
     .pip_install("setuptools", "wheel", "ninja", "jaxtyping", "rich>=12")
-    .env({"TORCH_CUDA_ARCH_LIST": "8.6;8.9", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
+    .env({"TORCH_CUDA_ARCH_LIST": "8.0;8.6;8.9;9.0", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
     .run_commands(
         f"git clone --depth 1 --recursive --shallow-submodules --branch v{GSPLAT_VERSION} "
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
@@ -145,8 +146,7 @@ preview_image = (
 # Futures with FLUX.1 Kontext dev (models.EDITORS["flux-kontext"]): the same gsplat render
 # as the preview image, plus a diffusers release with FluxKontextPipeline (0.34+). The
 # 12 B transformer and T5 in bf16 need about 34 GB, so an L40S (48 GB); A100-80GB or
-# H100 if no L40S is free. gsplat's kernels cover 8.9 (L40S) only, so the larger GPUs
-# compile them on first use (70 to 90 s), which is acceptable for the fallback.
+# H100 if no L40S is free (gsplat's kernels are built for all three).
 KONTEXT_GPUS = ["L40S", "A100-80GB", "H100"]
 
 kontext_image = (
