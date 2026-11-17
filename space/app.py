@@ -1364,6 +1364,28 @@ def _changed_area(job: Job | None, image: Path | None):
     return gr.update(value=str(dest), visible=True)
 
 
+def _detections_image(job: Job | None):
+    """The labelled detection image of a masked future (add-detection-preview), captioned
+    "Detected: 3 × chair, 1 × stool". A hidden, empty update for other tiles and for masked
+    futures made before it existed."""
+    hidden = gr.update(value=None, visible=False)
+    if job is None or not job.params.get("object_query"):
+        return hidden
+    path = _local("futures", "detections", f"{job.job_id}.jpg")
+    if not path.is_file():
+        try:
+            raw = PREVIEWS.detections.get(job.job_id)
+            if raw is None:
+                raw = STORE.download(f"previews/{job.job_id}/detections.jpg").read_bytes()
+        except Exception as e:  # made before add-detection-preview
+            print(f"detections of {job.job_id}: {e!r}")
+            return hidden
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    caption = futures.detections_caption(job) or "Detected objects"
+    return gr.update(value=str(path), visible=True, label=caption)
+
+
 def _future_thumb(job: Job) -> Path | None:
     dest = _local("thumbs", "futures", f"{job.job_id}.jpg")
     if dest.is_file():
@@ -1656,9 +1678,10 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
     """Poll the running future and a new viewpoint's render (every second).
 
     Outputs: status, running future, pending view render, result, result details,
-    "Start from this", gallery, tile keys, strip, timer, shown tile, changed area.
+    "Start from this", gallery, tile keys, strip, timer, shown tile, changed area,
+    detections.
     """
-    out = [gr.skip()] * 12
+    out = [gr.skip()] * 13
     view_pending, running = bool(pending), bool(job_id)
     if pending:
         try:
@@ -1714,6 +1737,7 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
                 out[5] = gr.update(interactive=True)
                 out[10] = job.job_id  # "Start from this" builds on the image just shown
                 out[11] = _changed_area(job, image)
+                out[12] = _detections_image(job)
                 if scene_id and vp:
                     items, keys, label = _gallery(scene_id, vp.id)
                     out[6], out[7] = gr.update(value=items, label=label), keys
@@ -1758,11 +1782,11 @@ def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
     the two to compare.
 
     Outputs: result, result details, "Start from this", shown tile, picked, compare note,
-    viewer message, changed area.
+    viewer message, changed area, detections.
     """
     i = evt.index if isinstance(evt.index, int) else evt.index[0]
     if not keys or not 0 <= i < len(keys):
-        return [gr.skip()] * 8
+        return [gr.skip()] * 9
     key = keys[i]
     image, details = _tile_image(scene_id, vp_id, key)
     overlay = _viewer_overlay(scene_id, vp_id, key, image)
@@ -1771,10 +1795,10 @@ def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
     note = "Picked to compare: " + " and ".join(names)
     if len(picked) < 2:
         note += " (pick one more)"
-    changed = _changed_area(_future_job(key) if key != "render" else None, image)
+    job = _future_job(key) if key != "render" else None
     return [str(image) if image else None, details,
             gr.update(interactive=key != "render"), key, picked, note, overlay,
-            changed]  # fmt: skip
+            _changed_area(job, image), _detections_image(job)]  # fmt: skip
 
 
 _DELETE_LOCK = threading.Lock()
@@ -1838,11 +1862,16 @@ def on_start_from(shown: str | None):
 
 
 def on_compare(scene_id, vp_id, picked):
-    """Show the two picked tiles side by side. Outputs: row, image A, text A, image B, text B."""
+    """Show the two picked tiles side by side. Outputs: row, image A, text A, detections A,
+    image B, text B, detections B."""
     if not picked or len(picked) < 2:
         raise gr.Error("Pick two tiles in the gallery first (a future, or the plain render).")
-    (a, da), (b, db) = (_tile_image(scene_id, vp_id, k) for k in picked[-2:])
-    return gr.update(visible=True), str(a) if a else None, da, str(b) if b else None, db
+    out = [gr.update(visible=True)]
+    for k in picked[-2:]:
+        image, details = _tile_image(scene_id, vp_id, k)
+        job = _future_job(k) if k != "render" else None
+        out += [str(image) if image else None, details, _detections_image(job)]
+    return out
 
 
 def on_save_future_settings(scene_id, text, editor):
@@ -2337,11 +2366,17 @@ def build() -> gr.Blocks:
                                     label="Future (download with the arrow)",
                                     interactive=False, format="jpeg", height=360,
                                 )  # fmt: skip
-                                fu_changed = gr.Image(
-                                    label="Changed area (the dimmed part is unchanged)",
-                                    interactive=False, format="jpeg", height=180,
-                                    visible=False,
-                                )  # fmt: skip
+                                with gr.Row(equal_height=True):
+                                    fu_changed = gr.Image(
+                                        label="Changed area (the dimmed part is unchanged)",
+                                        interactive=False, format="jpeg", height=240,
+                                        visible=False, min_width=120,
+                                    )  # fmt: skip
+                                    fu_detected = gr.Image(
+                                        label="Detected objects", interactive=False,
+                                        format="jpeg", height=240, visible=False,
+                                        min_width=120,
+                                    )  # fmt: skip
                                 fu_details = gr.Markdown()
                                 fu_from = gr.Button("Start from this", interactive=False)
                                 fu_gallery = gr.Gallery(
@@ -2358,11 +2393,17 @@ def build() -> gr.Blocks:
                                             interactive=False, height=300, show_label=False
                                         )
                                         fu_cmp_a_md = gr.Markdown()
+                                        fu_cmp_a_det = gr.Image(
+                                            interactive=False, height=160, visible=False
+                                        )
                                     with gr.Column(min_width=120):
                                         fu_cmp_b = gr.Image(
                                             interactive=False, height=300, show_label=False
                                         )
                                         fu_cmp_b_md = gr.Markdown()
+                                        fu_cmp_b_det = gr.Image(
+                                            interactive=False, height=160, visible=False
+                                        )
                                 with gr.Accordion("Settings: starters and editor", open=False):
                                     fu_starters = gr.Textbox(
                                         label="Starter directions (one per line, "
@@ -2650,7 +2691,7 @@ def build() -> gr.Blocks:
         fu_timer.tick(
             on_futures_tick, [fu_job, fu_pending, picker, fu_vp],
             [fu_status, fu_job, fu_pending, fu_result, fu_details, fu_from, fu_gallery,
-             fu_keys, fu_strip, fu_timer, fu_shown, fu_changed],
+             fu_keys, fu_strip, fu_timer, fu_shown, fu_changed, fu_detected],
             concurrency_limit=1, show_progress="hidden",
         )  # fmt: skip
         # A started or finished future adds a line to the prompt log.
@@ -2658,7 +2699,7 @@ def build() -> gr.Blocks:
         fu_gallery.select(
             on_pick_tile, [picker, fu_vp, fu_keys, fu_picked],
             [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note, fu_overlay,
-             fu_changed],
+             fu_changed, fu_detected],
         ).then(None, fu_overlay, None, js=SHOW_FUTURE_JS)  # fmt: skip
         # `input` only (a programmatic value change must not delete); `fu_deleted` keeps
         # the last request, so an event that arrives twice deletes one future, not two.
@@ -2675,7 +2716,7 @@ def build() -> gr.Blocks:
         )  # fmt: skip
         fu_compare.click(
             on_compare, [picker, fu_vp, fu_picked],
-            [fu_cmp, fu_cmp_a, fu_cmp_a_md, fu_cmp_b, fu_cmp_b_md],
+            [fu_cmp, fu_cmp_a, fu_cmp_a_md, fu_cmp_a_det, fu_cmp_b, fu_cmp_b_md, fu_cmp_b_det],
         )  # fmt: skip
         clicked(
             fu_settings_save, "⏳ Saving…", on_save_future_settings,

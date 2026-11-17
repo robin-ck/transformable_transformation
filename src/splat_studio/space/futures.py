@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from splat_studio import models
-from splat_studio.editing import masking
+from splat_studio.editing import annotate, masking
 
 from .jobs import FINAL, Job, JobManager
 from .viewpoints import Starter, Viewpoint
@@ -166,10 +166,21 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
         n = (job.run.get("mask") or {}).get("detections")
         found = f" ({n} found; the rest of the view is unchanged)" if n else ""
         lines.append(f"**Object to change:** {p['object_query']}{found}")
+        mask = job.run.get("mask") or {}
+        pairs = zip(mask.get("labels") or [], mask.get("scores") or [], strict=False)
+        listed = [annotate.label_text(i, lb, sc) for i, (lb, sc) in enumerate(pairs, 1)]
+        if listed:
+            lines.append("**Detected:** " + " · ".join(listed))
     model = job.run.get("model") or p.get("model")
     steps = f" · {p['steps']} steps" if p.get("steps") else ""
     lines.append(f"**Editor:** {model}{steps} · seed {p.get('seed', 0)} · job `{job.job_id}`")
     return "  \n".join(lines)
+
+
+def detections_caption(job: Job) -> str | None:
+    """ "Detected: 3 × chair, 1 × stool" for a masked future (None without detections)."""
+    labels = (job.run.get("mask") or {}).get("labels")
+    return annotate.detections_caption(labels) if labels else None
 
 
 def thumbnail(src: Path, dest: Path, side: int = THUMB_SIDE) -> Path:

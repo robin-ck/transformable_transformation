@@ -255,6 +255,8 @@ class JobManager:
         self.images: dict[str, bytes] = {}
         # Object masks of masked futures (PNG bytes, by job id; add-object-masking).
         self.masks: dict[str, bytes] = {}
+        # Labelled detection images of masked futures (JPEG bytes; add-detection-preview).
+        self.detections: dict[str, bytes] = {}
 
     def _save(self, job: Job) -> Job:
         self.store.write_json(f"{self.prefix}/{job.job_id}/job.json", asdict(job))
@@ -451,6 +453,9 @@ class JobManager:
         mask = result.pop("mask_png", None)
         if isinstance(mask, bytes):
             self.masks[job.job_id] = mask
+        detected = result.pop("detections_jpeg", None)
+        if isinstance(detected, bytes):
+            self.detections[job.job_id] = detected
         job.status = "done" if result.get("status") == "done" else "failed"
         job.error = result.get("error")
         job.scene_path = result.get("scene_path")

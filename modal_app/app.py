@@ -1041,7 +1041,7 @@ class _ViewRestyler:
         from huggingface_hub import HfApi
 
         from splat_studio import models
-        from splat_studio.editing import masking
+        from splat_studio.editing import annotate, masking
         from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
@@ -1087,7 +1087,7 @@ class _ViewRestyler:
                     image = image.resize(render.size)
                 log.stage("download_input", time.time() - t)
 
-            mask = mask_meta = None
+            mask = mask_meta = detections_jpeg = None
             if object_query:  # before the edit, so "not found" fails in about a second
                 if self.masker is None:
                     raise errors.preview_failed(f"{spec.name} cannot limit changes to an object")
@@ -1097,12 +1097,18 @@ class _ViewRestyler:
                 if not found:
                     raise errors.object_not_found(object_query)
                 t = time.time()
-                hard = self.masker.segment(image, found)
+                masks = self.masker.segment(image, found)  # one per detection
+                hard = masks.any(0)
                 removal = masking.is_removal(prompt)
                 mask = masking.soft_mask(hard, removal)
                 mask_meta = masking.mask_info(object_query, found, hard, removal,
                                               self.masker.labels)  # fmt: skip
                 log.stage("segment", time.time() - t)
+                t = time.time()  # labelled image of what was detected (add-detection-preview)
+                detected = annotate.draw_detections(image, found, masks)
+                files[f"{prefix}/detections.jpg"] = detected
+                detections_jpeg = _jpeg(detected, 85)
+                log.stage("annotate", time.time() - t)
 
             t = time.time()
             styled = self.editor.restyle(
@@ -1161,6 +1167,8 @@ class _ViewRestyler:
             result["image_jpeg"] = jpeg
             if mask_png:
                 result["mask_png"] = mask_png
+            if detections_jpeg:
+                result["detections_jpeg"] = detections_jpeg
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
