@@ -102,7 +102,7 @@ Then add the four secrets (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `HF_TOKEN`, `
 
 ### Using the Space
 
-The page has three tabs. It opens on **Scene** when a finished scene exists (at its newest version), otherwise on **New scene**.
+The page has three tabs. It opens on **Scene** when a finished scene exists (at its base version, v1, without edits; later versions open from the History table), otherwise on **New scene**.
 
 - **New scene:** upload one video or 20 to 300 photos, click "Create scene", and follow the job in the jobs list. When a job finishes you get a notice; pick it in the "Finished scene" list of the Scene tab to open it. "Speed and quality" (Fast, Standard, High) and "Scene settings" set the training steps, the frames taken from a video and the max image size; the line under them estimates GPU time and cost, and settings estimated above 45 min are refused.
 - **Scene:** pick a scene; the viewer is on the left, the tools on the right. "Scene details" under the scene list shows its date, input and settings, lets you give it a name (shown in the list) and notes, and deletes it: after a second click, the scene, all its versions and its edits, previews and generated objects are removed from the dataset in one commit (refused while one of its jobs runs; Image editing results are kept; the files stay in the dataset's git history). Switching tools keeps the scene, version, camera and any object being placed. To keep the browser's memory down, the viewer shows scenes with more than 500k Gaussians as a merged copy of about 500k (made the first time a version is opened, 10 to 25 s on the test scenes, then cached under `light/`); downloads, edits and placement use the full scene.

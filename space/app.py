@@ -289,14 +289,17 @@ def _hidden_splat(version: Version | None, hidden: list[str] | None):
 
 
 def scene_view(job_id: str | None, number: int | None, obj_job: str | None, placing: bool):
-    """Open a version (newest if `number` is None) of a scene; outputs `SCENE_OUTPUTS`.
+    """Open a version of a scene; outputs `SCENE_OUTPUTS`.
+
+    With `number` None the base (v1, the reconstruction without edits) is shown;
+    later versions stay one click away in the History table.
 
     (version, hidden, viewer, download, shown, history table, place_group, placing,
     obj_job, moving)
     """
     job, versions = _scene(job_id)
     version = next((v for v in versions if v.number == number), None) if number else None
-    version = version or (versions[0] if versions else None)
+    version = version or min(versions, key=lambda v: v.number, default=None)
     rows = history_rows(versions, v1_input=job.summary if job else None)
     return (
         version.number if version else None,
@@ -321,7 +324,7 @@ def log_outputs(job_id: str | None, number: int | None):
 
 
 def on_pick_scene(job_id: str | None, obj_job: str | None, placing: bool):
-    """Show the newest version of the picked scene and list all its versions."""
+    """Show the base version of the picked scene and list all its versions."""
     return scene_view(job_id, None, obj_job, placing)
 
 
@@ -343,7 +346,8 @@ def _done_ids(jobs: list[Job]) -> list[str]:
 
 
 def on_load(obj_job: str | None, placing: bool):
-    """Open on the Scene tab with the newest finished scene, or on New scene if none.
+    """Open on the Scene tab with the newest finished scene (its base version), or on
+    New scene if none.
 
     Outputs: tabs, jobs table, picker, seen, then `SCENE_OUTPUTS`.
     """

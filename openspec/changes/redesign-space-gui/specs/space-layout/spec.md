@@ -11,7 +11,7 @@ The Space SHALL group its interface into a **New scene** tab (upload, create, jo
 
 #### Scenario: Returning user
 - **WHEN** a user opens the Space and finished scenes exist
-- **THEN** the Scene tab is shown with the newest finished scene opened at its newest version
+- **THEN** the Scene tab is shown with the newest finished scene opened at its base version (v1, without edits)
 
 ### Requirement: Tools next to the viewer
 The Scene tab SHALL show the viewer and a tool panel side by side on desktop widths, with sub-tabs History, Add object, Preview and Edit scene, so the viewer stays visible while a tool is used. On narrow screens the panel MAY stack below the viewer.
