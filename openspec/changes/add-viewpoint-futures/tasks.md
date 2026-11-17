@@ -21,8 +21,13 @@
   - Only when the folder exists (`viewpoints=` flag; the Space checks `list_dirs("viewpoints")`), since the Hub refuses to delete a missing folder. Futures are previews of the scene, so already covered. Test in `tests/test_scenes.py`; 221 passed. (Done before 2.3, which needs the whole Futures sub-tab.)
 
 ## 3. Futures
-- [ ] 3.1 `space/futures.py`: build the job params (viewpoint, starter id and text, parent, editor), compose the prompt (starter first, 300-character limit), list a viewpoint's futures (newest first, in-memory cache of finished records); tests
-- [ ] 3.2 Worker: `render(...)` accepts `view_prefix`, a camera for a new viewpoint (render, store view, restyle in one job) and `input_path`; keeps viewpoint images in memory per container; returns the restyled image as a JPEG in its result
+- [x] 3.1 `space/futures.py`: build the job params (viewpoint, starter id and text, parent, editor), compose the prompt (starter first, 300-character limit), list a viewpoint's futures (newest first, in-memory cache of finished records); tests
+  - The 300 characters count the whole prompt (starter included); a longer one is refused with a message, not cut. `params` also keep `own_prompt` (the user's text; `prompt` is what the editor got) and `view_prefix`. `FutureIndex` reads only `job.json`s it has not seen finished. Also `caption`, `details_markdown` and `thumbnail` (512 px JPEG) for 4.1/4.2.
+  - `JobManager.create_preview(..., future=, input_path=)`; the worker's returned `image_jpeg` is kept in `JobManager.images`, never in `job.json`; `refresh(job, save=False)` + `save(job)` let the Space show the image before writing `job.json`.
+  - `tests/test_futures.py`: 6 tests; 227 passed.
+- [x] 3.2 Worker: `render(...)` accepts `view_prefix`, a camera for a new viewpoint (render, store view, restyle in one job) and `input_path`; keeps viewpoint images in memory per container; returns the restyled image as a JPEG in its result
+  - Written with 2.2 (same code). A future of an existing viewpoint commits only `preview.png` and `run.json`; a new viewpoint's render, depth and `view.json` go into the same commit as the future. The last 16 restyled images also stay in memory, so building on a recent future downloads nothing. The "running" `run.json` is now uploaded in a background thread (joined before the final commit, so it cannot overwrite the finished one), which takes one Hub commit off the click-to-image path.
+  - Checked with stubs in `tests/test_preview_worker.py` (cold container reads the view from the dataset; missing parent fails cleanly). Not run on a GPU (6.2).
 - [ ] 3.3 Space: starters, prompt, Make, status and result in the Futures sub-tab; Make from an unsaved current view saves it as a viewpoint; 1 s poll for the running future; shows the returned image before writing `job.json`; warm-up when the sub-tab opens
 - [ ] 3.4 "Start from this" on a future: parent's `preview.png` as input, parent recorded
 - [ ] 3.5 Prompt log lists futures as previews with the viewpoint name; test in `tests/test_prompt_log.py`

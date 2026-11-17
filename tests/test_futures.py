@@ -1,0 +1,142 @@
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from splat_studio import models
+from splat_studio.space import futures, viewpoints
+from splat_studio.space.jobs import Job, JobManager, LocalStore
+
+CAM = {"c2w": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 5], [0, 0, 0, 1]],
+       "fov_deg": 50.0, "aspect": 1.5}  # fmt: skip
+
+
+class FakeClient:
+    def __init__(self) -> None:
+        self.submitted: list[tuple] = []
+        self.results: dict[str, object] = {}
+
+    def submit_preview(self, job_id, scene_path, camera, prompt, **kw) -> str:
+        self.submitted.append((job_id, scene_path, prompt, kw))
+        return f"fc-{job_id}"
+
+    def poll(self, call_id):
+        r = self.results.get(call_id)
+        return ("finished", r) if r is not None else ("running", None)
+
+
+def _setup():
+    setup = viewpoints.default_setup()
+    vp = viewpoints.add_viewpoint(setup, "bridge", 2, CAM)
+    return setup, vp
+
+
+def test_prompt_puts_starter_first_and_has_a_limit() -> None:
+    setup, _ = _setup()
+    nature = setup.starter("nature-first")
+    assert futures.compose_prompt(nature, "  willows  where the parking is ") == (
+        f"{nature.text}, willows where the parking is"
+    )
+    assert futures.compose_prompt(nature, "") == nature.text  # starter only
+    assert futures.compose_prompt(None, "a fish ladder") == "a fish ladder"
+    with pytest.raises(futures.FutureError, match="Type what"):
+        futures.compose_prompt(None, "  ")
+    with pytest.raises(futures.FutureError, match="limit is 300"):
+        futures.compose_prompt(nature, "x" * (300 - len(nature.text)))
+    futures.compose_prompt(nature, "x" * (298 - len(nature.text)))  # exactly 300: fine
+
+
+def test_future_job_records_viewpoint_starter_parent_editor(tmp_path: Path) -> None:
+    store, client = LocalStore(tmp_path), FakeClient()
+    mgr = JobManager(store, client, lambda: 10.0, prefix="previews")
+    setup, vp = _setup()
+    starter = setup.starter("flood-safe")
+    prefix = viewpoints.view_prefix("s1", vp.id)
+    params = futures.future_params(vp, prefix, starter, "a green dike", editor=None)
+    prompt = futures.compose_prompt(starter, "a green dike")
+    job = mgr.create_preview(prompt, "scenes/s1/v2", CAM, seed=4, future=params)
+    assert job.summary == "a green dike"
+    sent = {"seed": 4, "strength": 0.7, "view_prefix": prefix}
+    assert client.submitted[-1] == (job.job_id, "scenes/s1/v2", prompt, sent)
+    saved = mgr.get(job.job_id).params
+    assert saved["viewpoint"] == vp.id and saved["parent"] is None
+    assert saved["starter"] == {"id": "flood-safe", "label": "flood safe", "text": starter.text}
+    assert saved["editor"] == "sdxl-depth" and saved["model"] == models.editor_spec(None).label
+    assert saved["prompt"] == prompt and saved["own_prompt"] == "a green dike"
+
+    # The worker returns the image: it is kept in memory, not written into job.json.
+    client.results[job.call_id] = {"status": "done", "scene_path": f"previews/{job.job_id}",
+                                   "image_jpeg": b"\xff\xd8jpeg"}  # fmt: skip
+    done = mgr.refresh(job, save=False)
+    assert done.status == "done" and mgr.images[job.job_id] == b"\xff\xd8jpeg"
+    assert mgr.get(job.job_id).status == "queued"  # not saved yet
+    mgr.save(done)
+    assert mgr.get(job.job_id).status == "done" and "image_jpeg" not in mgr.get(job.job_id).run
+
+    # Build on it: same viewpoint, its image as input, parent recorded.
+    child_params = futures.future_params(vp, prefix, None, "add a footbridge", parent=done)
+    child = mgr.create_preview("add a footbridge", "scenes/s1/v2", CAM, future=child_params,
+                               input_path=f"previews/{job.job_id}/preview.png")  # fmt: skip
+    assert client.submitted[-1][3]["input_path"] == f"previews/{job.job_id}/preview.png"
+    assert mgr.get(child.job_id).params["parent"] == job.job_id
+    other = viewpoints.add_viewpoint(setup, "east", 2, CAM)
+    with pytest.raises(futures.FutureError, match="same viewpoint"):
+        futures.future_params(other, prefix, None, "x", parent=done)
+
+
+def test_old_preview_is_not_a_future_and_keeps_its_call(tmp_path: Path) -> None:
+    client = FakeClient()
+    mgr = JobManager(LocalStore(tmp_path), client, lambda: 1.0, prefix="previews")
+    job = mgr.create_preview("autumn", "scenes/s1/v1", CAM)
+    assert client.submitted[-1][3] == {"seed": 0, "strength": 0.7}
+    assert not futures.is_future(job) and job.summary == "autumn"
+
+
+def _future(job_id: str, vp: str, t: float, status: str = "done", **params) -> Job:
+    job = Job(job_id, "preview", job_id, t, status=status)
+    job.params = {"viewpoint": vp, "own_prompt": params.pop("own", ""), **params}
+    return job
+
+
+def test_gallery_lists_finished_futures_of_one_viewpoint_newest_first() -> None:
+    old_preview = Job("p0", "preview", "x", 9.0, status="done")
+    jobs = [_future("a", "vp1", 1.0), _future("b", "vp1", 3.0), _future("c", "vp2", 4.0),
+            _future("d", "vp1", 5.0, status="failed"), _future("e", "vp1", 6.0, "running"),
+            old_preview]  # fmt: skip
+    assert [j.job_id for j in futures.viewpoint_futures(jobs, "vp1")] == ["b", "a"]
+    assert futures.viewpoint_futures(jobs, None) == []
+
+
+def test_index_reads_finished_jobs_once(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    mgr = JobManager(store, FakeClient(), prefix="previews")
+    from dataclasses import asdict
+
+    for job in (_future("a", "v", 1.0), _future("b", "v", 2.0, status="running")):
+        store.write_json(f"previews/{job.job_id}/job.json", asdict(job))
+    index = futures.FutureIndex(mgr)
+    reads = []
+    original = mgr.get
+    mgr.get = lambda job_id: reads.append(job_id) or original(job_id)
+    assert sorted(j.job_id for j in index.jobs()) == ["a", "b"]
+    assert sorted(j.job_id for j in index.jobs()) == ["a", "b"]
+    assert reads == ["a", "b", "b"]  # "a" is finished: read once
+
+
+def test_caption_details_and_thumbnail(tmp_path: Path) -> None:
+    starter = {"id": "housing", "label": "housing", "text": "new houses"}
+    job = _future("j1", "vp1", 60.0, own="", starter=starter, parent="j0", seed=2,
+                  model="sdxl@1 + cn@2")  # fmt: skip
+    assert futures.caption(job) == "housing"
+    long = _future("j2", "vp1", 0.0, own="x" * 60)
+    assert futures.caption(long).endswith("…") and len(futures.caption(long)) == 48
+    md = futures.details_markdown(job, "bridge")
+    assert "view **bridge**" in md and "(starter only)" in md and "new houses" in md
+    assert "`j0`" in md and "sdxl@1 + cn@2" in md and "1970-01-01" in md
+
+    src = tmp_path / "big.png"
+    Image.new("RGB", (1024, 768), "blue").save(src)
+    thumb = futures.thumbnail(src, tmp_path / "t" / "a.jpg")
+    with Image.open(thumb) as img:
+        assert img.size == (512, 384) and img.format == "JPEG"
+    assert futures.thumbnail(tmp_path / "missing.png", thumb) == thumb  # cached

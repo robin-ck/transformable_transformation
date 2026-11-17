@@ -9,9 +9,12 @@ Object jobs (task 4.2) use the same layout under `objects/<job_id>/`, with the
 generated object in `object.ply`, `object.splat` and `reference.png`; an uploaded
 reference photo goes to `objects/<job_id>/input/reference.<ext>`.
 Preview jobs (task 4.3) live under `previews/<job_id>/` with `render.png`, `depth.png`
-and `preview.png`; they never write to `scenes/`. Edit jobs (task 4.4) live under
-`edits/<job_id>/` with before/after renders; the worker itself saves the edited scene
-as the next version under `scenes/`, and its run log names it (`version`).
+and `preview.png`; they never write to `scenes/`. Futures (add-viewpoint-futures) are
+preview jobs with extra `params` (see `futures.py`); their render and depth stay in the
+viewpoint's folder, so their own folder holds only `preview.png` and `run.json`.
+Edit jobs (task 4.4) live under `edits/<job_id>/` with before/after renders; the worker
+itself saves the edited scene as the next version under `scenes/`, and its run log
+names it (`version`).
 Image jobs (Image editing tab) live under `images/<job_id>/` with `result.png`; an
 uploaded input image goes to `images/<job_id>/input/source.<ext>`. A base image saved
 without a GPU step is stored as-is as `images/<job_id>/result.<ext>`.
@@ -247,6 +250,9 @@ class JobManager:
     ) -> None:
         self.store, self.client, self.clock = store, client, clock
         self.prefix, self.timeout_s = prefix, timeout_s
+        # Images a worker returned with its result (JPEG bytes, by job id); kept out of
+        # job.json and shown by the Space before it fetches anything from the Hub.
+        self.images: dict[str, bytes] = {}
 
     def _save(self, job: Job) -> Job:
         self.store.write_json(f"{self.prefix}/{job.job_id}/job.json", asdict(job))
@@ -348,18 +354,36 @@ class JobManager:
         camera: dict,
         seed: int = 0,
         strength: float = 0.7,
+        future: dict | None = None,
+        input_path: str | None = None,
     ) -> Job:
-        """Record a preview job (a 2D restyle of one view) and start it on Modal."""
+        """Record a preview job (a 2D restyle of one view) and start it on Modal.
+
+        `future` (`futures.future_params`) makes it a future of a viewpoint: the worker
+        starts from the viewpoint's stored images, or renders `camera` and stores them if
+        the viewpoint has none yet. `input_path` (a parent future's image) is restyled
+        instead of the render.
+        """
         now = self.clock()
-        job = Job(new_job_id(now), "preview", " ".join(prompt.split())[:80], now)
-        model = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
+        future = future or {}
+        name = future.get("own_prompt") or (future.get("starter") or {}).get("label") or prompt
+        job = Job(new_job_id(now), "preview", " ".join(name.split())[:80], now)
+        spec = models.editor_spec(future.get("editor"))
         job.params = {"prompt": prompt, "seed": seed, "strength": strength,
-                      "scene_path": scene_path, "camera": camera, "model": model}  # fmt: skip
+                      "scene_path": scene_path, "camera": camera, "model": spec.label,
+                      **future}  # fmt: skip
+        kwargs: dict[str, Any] = {}
+        if future:
+            kwargs["view_prefix"] = future["view_prefix"]
+            if spec.modal_class != "PreviewRenderer":
+                kwargs["class_name"] = spec.modal_class
+        if input_path:
+            job.params["input_path"] = kwargs["input_path"] = input_path
         self._save(job)
         return self._start(
             job,
             lambda: self.client.submit_preview(
-                job.job_id, scene_path, camera, prompt, seed=seed, strength=strength
+                job.job_id, scene_path, camera, prompt, seed=seed, strength=strength, **kwargs
             ),
         )
 
@@ -414,14 +438,22 @@ class JobManager:
         return Job.from_dict(data) if data else None
 
     def _apply_result(self, job: Job, result: dict) -> None:
+        result = dict(result)
+        image = result.pop("image_jpeg", None)
+        if isinstance(image, bytes):
+            self.images[job.job_id] = image
         job.status = "done" if result.get("status") == "done" else "failed"
         job.error = result.get("error")
         job.scene_path = result.get("scene_path")
         job.run = result
         job.finished_at = self.clock()
 
-    def refresh(self, job: Job) -> Job:
-        """Update a running job from Modal; finished jobs are returned unchanged."""
+    def refresh(self, job: Job, save: bool = True) -> Job:
+        """Update a running job from Modal; finished jobs are returned unchanged.
+
+        With `save=False` the change is not written to `job.json`; the caller saves it
+        later (`save`), e.g. after showing a returned image first.
+        """
         if job.status in FINAL:
             return job
         before = asdict(job)
@@ -450,7 +482,10 @@ class JobManager:
                 run = self.store.read_json(f"{self.prefix}/{job.job_id}/run.json")
                 job.status = "running" if run else "queued"
                 job.run = run or {}
-        return self._save(job) if asdict(job) != before else job
+        return self._save(job) if save and asdict(job) != before else job
+
+    def save(self, job: Job) -> Job:
+        return self._save(job)
 
     def list(self, refresh: bool = True) -> list[Job]:
         """All jobs, newest first; unfinished jobs are refreshed."""
