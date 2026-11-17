@@ -19,6 +19,9 @@ from dataclasses import dataclass
 ALLOWED_LICENCES = frozenset(
     {"mit", "apache-2.0", "openrail", "openrail++", "creativeml-openrail-m"}
 )
+# Licences allowed only for research use, and only for an editor that is not the
+# default (the user picks it per scene). Recorded in openspec/project.md.
+RESEARCH_ONLY_LICENCES = frozenset({"flux-1-dev-non-commercial-license"})
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,18 @@ PREVIEW_DEPTH = ModelSpec(
     role="keep the scene layout via the rendered depth map",
 )
 
+# Futures editor (instruction edits): FLUX.1 Kontext dev changes what the prompt names
+# ("remove the chairs", "paint the chairs red") and keeps the rest of the view. Gated on
+# the Hub: the HF token's account must accept the licence. Non-commercial licence, so
+# research use only (RESEARCH_ONLY_LICENCES). Read on 2026-11-17.
+KONTEXT = ModelSpec(
+    repo_id="black-forest-labs/FLUX.1-Kontext-dev",
+    revision="24e9dedc4ef646698dc8eb4e18ae2cec3c9fea0d",
+    licence="flux-1-dev-non-commercial-license",
+    gpu="L40S",
+    role="instruction edits of a view or future (12 B transformer, bf16, about 34 GB)",
+)
+
 
 @dataclass(frozen=True)
 class EditorSpec:
@@ -110,6 +125,10 @@ class EditorSpec:
     def licence(self) -> str:
         return " + ".join(sorted({m.licence for m in self.models}))
 
+    @property
+    def research_only(self) -> bool:
+        return any(m.licence in RESEARCH_ONLY_LICENCES for m in self.models)
+
 
 EDITORS = {
     "sdxl-depth": EditorSpec(
@@ -118,6 +137,13 @@ EDITORS = {
         models=(PREVIEW_BASE, PREVIEW_DEPTH),
         uses_depth=True,
         modal_class="PreviewRenderer",
+    ),
+    "flux-kontext": EditorSpec(
+        key="flux-kontext",
+        name="FLUX.1 Kontext dev (instruction edits, research use only)",
+        models=(KONTEXT,),
+        uses_depth=False,
+        modal_class="KontextRenderer",
     ),
 }
 DEFAULT_EDITOR = "sdxl-depth"
@@ -138,4 +164,5 @@ ALL = (
     IMAGE_EDIT,
     PREVIEW_BASE,
     PREVIEW_DEPTH,
+    KONTEXT,
 )
