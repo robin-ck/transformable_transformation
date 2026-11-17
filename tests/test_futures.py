@@ -163,6 +163,35 @@ def test_speed_picks_the_editors_steps():
         futures.steps_for(None, "turbo")
 
 
+def test_object_to_change_goes_to_kontext_and_shows_in_details(tmp_path: Path) -> None:
+    store, client = LocalStore(tmp_path), FakeClient()
+    mgr = JobManager(store, client, lambda: 10.0, prefix="previews")
+    _, vp = _setup()
+    prefix = viewpoints.view_prefix("s1", vp.id)
+    params = futures.future_params(vp, prefix, None, "make the chairs red", None,
+                                   "flux-kontext", object_query="  chairs ")  # fmt: skip
+    assert params["object_query"] == "chairs"
+    job = mgr.create_preview("make the chairs red", "scenes/s1/v2", CAM, future=params)
+    kw = client.submitted[-1][3]
+    assert kw["object_query"] == "chairs" and kw["class_name"] == "KontextRenderer"
+    # The returned mask is kept in memory like the image, never in job.json.
+    client.results[job.call_id] = {"status": "done", "scene_path": "previews/x",
+                                   "image_jpeg": b"jpg", "mask_png": b"png",
+                                   "mask": {"detections": 3}}  # fmt: skip
+    job = mgr.refresh(job)
+    assert mgr.masks[job.job_id] == b"png" and "mask_png" not in job.run
+    assert "**Object to change:** chairs (3 found" in futures.details_markdown(job)
+
+    # No object: no field, nothing sent.
+    plain = futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query=" ")
+    assert "object_query" not in plain
+    # SDXL cannot mask; over-long queries are refused.
+    with pytest.raises(futures.FutureError, match="Only the FLUX.1 Kontext editor"):
+        futures.future_params(vp, prefix, None, "x", None, "sdxl-depth", object_query="chairs")
+    with pytest.raises(futures.FutureError, match="limit"):
+        futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query="x" * 61)
+
+
 def test_delete_future_removes_its_folder(tmp_path: Path) -> None:
     from dataclasses import asdict
 

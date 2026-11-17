@@ -124,6 +124,16 @@ def preview_empty() -> ReconstructionError:
     )
 
 
+def object_not_found(query: str) -> ReconstructionError:
+    """'Object to change' (add-object-masking) found nothing in the start image."""
+    return ReconstructionError(
+        "object_not_found",
+        f'Nothing matching "{query}" was found in this view, so nothing was changed.',
+        'Tip: try another word (e.g. "chair" or "bench"), or leave "Object to change" '
+        "empty to edit the whole view.",
+    )
+
+
 def edit_failed(detail: str) -> ReconstructionError:
     return ReconstructionError(
         "edit_failed",

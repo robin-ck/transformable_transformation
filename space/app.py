@@ -22,7 +22,7 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio import models  # noqa: E402
-from splat_studio.editing import images  # noqa: E402
+from splat_studio.editing import images, masking  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import (  # noqa: E402
@@ -1337,6 +1337,33 @@ def _future_image(job: Job) -> Path | None:
         return None
 
 
+def _changed_area(job: Job | None, image: Path | None):
+    """The "Changed area" image of a masked future (add-object-masking): the future with
+    the unchanged part dimmed. A hidden, empty update for other tiles."""
+    hidden = gr.update(value=None, visible=False)
+    if job is None or image is None or not job.params.get("object_query"):
+        return hidden
+    dest = _local("thumbs", "changed", f"{job.job_id}.jpg")
+    if not dest.is_file():
+        import io
+
+        from PIL import Image
+
+        try:
+            raw = PREVIEWS.masks.get(job.job_id)
+            if raw is None:
+                raw = STORE.download(f"previews/{job.job_id}/mask.png").read_bytes()
+            with Image.open(image) as img, Image.open(io.BytesIO(raw)) as mask:
+                out = masking.changed_area(img, mask)
+        except Exception as e:  # an old or failed future without mask.png
+            print(f"changed area of {job.job_id}: {e!r}")
+            return hidden
+        out.thumbnail((futures.THUMB_SIDE, futures.THUMB_SIDE))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        out.save(dest, format="JPEG", quality=85)
+    return gr.update(value=str(dest), visible=True)
+
+
 def _future_thumb(job: Job) -> Path | None:
     dest = _local("thumbs", "futures", f"{job.job_id}.jpg")
     if dest.is_file():
@@ -1559,8 +1586,9 @@ def on_manage_viewpoint(action: str, scene_id, vp_id, name):
 
 
 def on_make_future(
-    camera_json, scene_id, starter_label, prompt, seed, speed, vp_id, parent_id, number
-):
+    camera_json, scene_id, starter_label, prompt, object_query, seed, speed, vp_id, parent_id,
+    number,
+):  # fmt: skip
     """Start a future. From the selected view while the viewer is at it (or from the
     parent future's view when building on one); otherwise the current view is saved as
     a new viewpoint first, in the same GPU job.
@@ -1589,7 +1617,7 @@ def on_make_future(
         text = futures.compose_prompt(starter, prompt)
         params = futures.future_params(
             vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor,
-            speed,
+            speed, object_query,
         )  # fmt: skip
     except futures.FutureError as e:
         raise gr.Error(str(e)) from e
@@ -1628,9 +1656,9 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
     """Poll the running future and a new viewpoint's render (every second).
 
     Outputs: status, running future, pending view render, result, result details,
-    "Start from this", gallery, tile keys, strip, timer, shown tile.
+    "Start from this", gallery, tile keys, strip, timer, shown tile, changed area.
     """
-    out = [gr.skip()] * 11
+    out = [gr.skip()] * 12
     view_pending, running = bool(pending), bool(job_id)
     if pending:
         try:
@@ -1685,6 +1713,7 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
                 out[4] = futures.details_markdown(job, vp.name if vp else None)
                 out[5] = gr.update(interactive=True)
                 out[10] = job.job_id  # "Start from this" builds on the image just shown
+                out[11] = _changed_area(job, image)
                 if scene_id and vp:
                     items, keys, label = _gallery(scene_id, vp.id)
                     out[6], out[7] = gr.update(value=items, label=label), keys
@@ -1729,11 +1758,11 @@ def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
     the two to compare.
 
     Outputs: result, result details, "Start from this", shown tile, picked, compare note,
-    viewer message.
+    viewer message, changed area.
     """
     i = evt.index if isinstance(evt.index, int) else evt.index[0]
     if not keys or not 0 <= i < len(keys):
-        return [gr.skip()] * 7
+        return [gr.skip()] * 8
     key = keys[i]
     image, details = _tile_image(scene_id, vp_id, key)
     overlay = _viewer_overlay(scene_id, vp_id, key, image)
@@ -1742,8 +1771,10 @@ def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
     note = "Picked to compare: " + " and ".join(names)
     if len(picked) < 2:
         note += " (pick one more)"
+    changed = _changed_area(_future_job(key) if key != "render" else None, image)
     return [str(image) if image else None, details,
-            gr.update(interactive=key != "render"), key, picked, note, overlay]  # fmt: skip
+            gr.update(interactive=key != "render"), key, picked, note, overlay,
+            changed]  # fmt: skip
 
 
 _DELETE_LOCK = threading.Lock()
@@ -2284,6 +2315,12 @@ def build() -> gr.Blocks:
                                     placeholder="wide reed beds and a wooden footbridge",
                                     max_length=futures.MAX_PROMPT, lines=2,
                                 )  # fmt: skip
+                                fu_object = gr.Textbox(
+                                    label="Object to change (optional)", max_lines=1,
+                                    max_length=masking.MAX_QUERY, placeholder="chairs",
+                                    info="Only that object changes; the rest of the view stays "
+                                    "exactly as it is. FLUX.1 Kontext editor only.",
+                                )  # fmt: skip
                                 with gr.Group(visible=False) as fu_parent_group:
                                     fu_parent_note = gr.Markdown()
                                     fu_parent_clear = gr.Button("Start fresh instead", size="sm")
@@ -2299,6 +2336,11 @@ def build() -> gr.Blocks:
                                 fu_result = gr.Image(
                                     label="Future (download with the arrow)",
                                     interactive=False, format="jpeg", height=360,
+                                )  # fmt: skip
+                                fu_changed = gr.Image(
+                                    label="Changed area (the dimmed part is unchanged)",
+                                    interactive=False, format="jpeg", height=180,
+                                    visible=False,
                                 )  # fmt: skip
                                 fu_details = gr.Markdown()
                                 fu_from = gr.Button("Start from this", interactive=False)
@@ -2599,8 +2641,8 @@ def build() -> gr.Blocks:
         clicked(
             fu_make, "⏳ Starting…", on_make_future,
             # States go last: GET_CAMERA_JS only replaces the first input.
-            [camera_json, picker, fu_starter, fu_prompt, fu_seed, fu_speed, fu_vp, fu_parent,
-             version],
+            [camera_json, picker, fu_starter, fu_prompt, fu_object, fu_seed, fu_speed, fu_vp,
+             fu_parent, version],
             [fu_status, fu_job, fu_vp, fu_parent, fu_parent_note, fu_strip, fu_vp_ids, fu_name,
              fu_gallery, fu_keys, fu_timer],
             js=GET_CAMERA_JS,
@@ -2608,14 +2650,15 @@ def build() -> gr.Blocks:
         fu_timer.tick(
             on_futures_tick, [fu_job, fu_pending, picker, fu_vp],
             [fu_status, fu_job, fu_pending, fu_result, fu_details, fu_from, fu_gallery,
-             fu_keys, fu_strip, fu_timer, fu_shown],
+             fu_keys, fu_strip, fu_timer, fu_shown, fu_changed],
             concurrency_limit=1, show_progress="hidden",
         )  # fmt: skip
         # A started or finished future adds a line to the prompt log.
         fu_job.change(*log)
         fu_gallery.select(
             on_pick_tile, [picker, fu_vp, fu_keys, fu_picked],
-            [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note, fu_overlay],
+            [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note, fu_overlay,
+             fu_changed],
         ).then(None, fu_overlay, None, js=SHOW_FUTURE_JS)  # fmt: skip
         # `input` only (a programmatic value change must not delete); `fu_deleted` keeps
         # the last request, so an event that arrives twice deletes one future, not two.
