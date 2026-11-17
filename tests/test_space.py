@@ -527,3 +527,15 @@ def test_object_list_and_library_choices() -> None:
         ("thing a (seed 2, a)", "a"),
     ]
     assert library_choices(listed, None) == []
+
+
+def test_scene_html_keeps_the_last_view_per_scene(tmp_path: Path) -> None:
+    store = jobs.LocalStore(tmp_path)
+    (tmp_path / "scenes/j1/v2").mkdir(parents=True)
+    np.zeros((4, 8), dtype=np.float32).tofile(tmp_path / "scenes/j1/v2/scene.splat")
+    doc = html.unescape(viewer.scene_html(store, "scenes/j1/v2"))
+    assert '"viewKey": "j1"' in doc and '"restore": true' in doc  # same key for every version
+    cam = viewer.Camera((1.0, 2.0, 3.0), (0.0, 0.0, 0.0))
+    doc = html.unescape(viewer.scene_html(store, "scenes/j1/v2", camera=cam))
+    assert '"viewKey": "j1"' in doc and '"restore": false' in doc  # a reload keeps its camera
+    assert '"viewKey": null' in viewer.viewer_document("/s.splat", cam)

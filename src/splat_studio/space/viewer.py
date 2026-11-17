@@ -34,6 +34,11 @@ the object on `{type: "object_visible", visible}`.
 Region (task 4.4): `{type: "region_mode", on}` shows an overlay where dragging draws
 a box (as fractions of the view, top left 0,0) instead of moving the camera; the
 camera reply then carries `region: [x0, y0, x1, y1]` (or null).
+
+Last view: with a `view_key` (the scene id), the page keeps the camera position and
+orbit centre in the browser's localStorage after each move, and a scene opened
+without an explicit camera starts at that saved view. "Reset view" still goes to the
+start camera. Storage that is blocked or empty just means the start camera is used.
 """
 
 from __future__ import annotations
@@ -143,13 +148,16 @@ def viewer_document(
     camera: Camera,
     obj: dict | None = None,
     floor: float = 0.0,
+    view_key: str | None = None,
+    restore_view: bool = True,
 ) -> str:
     """Self-contained HTML page that shows one `.splat` scene.
 
     `obj` adds a movable object: {"url": ..., "position": [...], "quaternion": [x, y, z, w],
     "scale": [...], "turn": degrees, "tiltX": degrees, "tiltY": degrees, "visible": bool} (see
     `editing.objects.Placement.to_viewer`). Clicks that hit no splat land on the plane
-    at height `floor`.
+    at height `floor`. With `view_key`, the last view is saved in the browser under that
+    key and, if `restore_view`, the page starts there instead of at `camera`.
     """
     config = json.dumps(
         {
@@ -159,6 +167,8 @@ def viewer_document(
             "up": camera.up,
             "object": obj,
             "floor": floor,
+            "viewKey": view_key,
+            "restore": bool(view_key) and restore_view,
         }
     ).replace("</", "<\\/")
     return (
@@ -174,9 +184,12 @@ def viewer_iframe(
     height: int = 560,
     obj: dict | None = None,
     floor: float = 0.0,
+    view_key: str | None = None,
+    restore_view: bool = True,
 ) -> str:
     """The viewer as an iframe for a `gr.HTML` block."""
-    doc = html.escape(viewer_document(scene_url, camera, obj, floor), quote=True)
+    doc = viewer_document(scene_url, camera, obj, floor, view_key, restore_view)
+    doc = html.escape(doc, quote=True)
     return (
         f'<iframe class="splat-viewer" title="3D scene viewer" srcdoc="{doc}" '
         f'style="width:100%;height:{int(height)}px;border:0;border-radius:8px;" '
@@ -235,6 +248,33 @@ const tip = document.getElementById("placehelp");
 // Click handlers in order; each returns true if it used the click. Without one, the
 // viewer's own handler runs (it moves the orbit centre to the clicked splat).
 const clickHandlers = [];
+
+// Last view (see the module docstring): {position, lookAt} per scene in localStorage.
+const viewKey = cfg.viewKey ? "splat-studio-view:" + cfg.viewKey : null;
+function savedView() {
+  if (!viewKey || !cfg.restore) return null;
+  try {
+    const v = JSON.parse(localStorage.getItem(viewKey) || "null");
+    const ok = (a) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
+    if (!v || !ok(v.position) || !ok(v.lookAt)) return null;
+    const d = v.position.map((c, i) => c - v.lookAt[i]);
+    return Math.hypot(...d) > 1e-6 ? v : null;
+  } catch (err) { return null; }
+}
+function keepView(viewer) {
+  const c = viewer.camera, o = viewer.controls;
+  if (!viewKey || !c || !o) return;
+  const save = () => {
+    try {
+      localStorage.setItem(viewKey, JSON.stringify({
+        position: [c.position.x, c.position.y, c.position.z],
+        lookAt: [o.target.x, o.target.y, o.target.z] }));
+    } catch (err) { /* storage blocked or full: the start camera is used next time */ }
+  };
+  let timer = null;
+  o.addEventListener("change", () => { clearTimeout(timer); timer = setTimeout(save, 300); });
+  window.addEventListener("pagehide", () => { if (timer) { clearTimeout(timer); save(); } });
+}
 
 // Point in the scene under the pointer: the library's splat raycast with `hide` (a
 // splat scene, e.g. the object being placed) left out, else the floor plane.
@@ -383,11 +423,12 @@ function setupPlacement(THREE, viewer, o) {
 try {
   const GS = await import("__VIEWER__");
   const THREE = await import("three");
+  const startView = savedView() || { position: cfg.position, lookAt: cfg.lookAt };
   const viewer = new GS.Viewer({
     rootElement: root,
     cameraUp: cfg.up,
-    initialCameraPosition: cfg.position,
-    initialCameraLookAt: cfg.lookAt,
+    initialCameraPosition: startView.position,
+    initialCameraLookAt: startView.lookAt,
     sharedMemoryForWorkers: false,
     useBuiltInControls: true,
     dynamicScene: !!cfg.object,  // the object moves after loading
@@ -471,6 +512,7 @@ try {
     for (const handle of clickHandlers) { if (handle(mouse)) return; }
     ownClick(mouse);
   };
+  keepView(viewer);
   viewer.start();
   window.splatViewerReady = true;
 } catch (err) {
@@ -521,9 +563,15 @@ def scene_html(
             return placeholder(f"No object file found in {object_path}.", height)
         obj = {"url": file_url(obj_splat), **(placement or {})}
     positions = splat_positions(splat)
+    # A camera passed in (a reload) wins; otherwise start at the view saved in the browser.
+    restore_view = camera is None
     camera = camera or camera_for(positions)
+    parts = scene_path.split("/")
+    view_key = parts[1] if len(parts) > 1 and parts[0] == "scenes" else scene_path
     try:  # the browser gets a lighter copy of big scenes (see `light`)
         shown = light_splat(splat, Path(store.file_dir) / "light")
     except Exception:  # memory, disk or a bad file: show the full scene instead
         shown = splat
-    return viewer_iframe(file_url(shown), camera, height, obj, floor_height(positions))
+    return viewer_iframe(
+        file_url(shown), camera, height, obj, floor_height(positions), view_key, restore_view
+    )
