@@ -10,11 +10,11 @@ from splat_studio.reconstruction import frames
 from splat_studio.reconstruction.pipeline import PHOTO_EXT, VIDEO_EXT
 
 MAX_VIDEO_SECONDS = 120
-MAX_VIDEO_BYTES = 500 * 1024 * 1024
+MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # a 2-min 4K phone clip is ~700-900 MB
 MIN_PHOTOS = 20
 MAX_PHOTOS = 300
 
-HELP = "Upload one video (MP4/MOV, up to 2 minutes and 500 MB) or 20 to 300 photos (JPG/PNG)."
+HELP = "Upload one video (MP4/MOV, up to 2 minutes and 1 GB) or 20 to 300 photos (JPG/PNG)."
 
 
 class UploadError(ValueError):
