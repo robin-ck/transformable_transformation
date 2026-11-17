@@ -22,7 +22,7 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio import models  # noqa: E402
-from splat_studio.editing import annotate, images, masking  # noqa: E402
+from splat_studio.editing import annotate, area, images, masking  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import (  # noqa: E402
@@ -1278,6 +1278,14 @@ FUTURE_HINT = (
 )
 
 
+AREA_COLOUR = "#ff3b30"
+AREA_HINT = (
+    "Paint where something new should go or what should change (a willow here, a wetland "
+    "on this meadow). Kontext edits a crop around the area and only the area changes. "
+    "Leave it empty to change the whole view; not together with 'Object to change'."
+)
+
+
 def _local(*parts: str) -> Path:
     return Path(STORE.file_dir).joinpath(*parts)
 
@@ -1341,7 +1349,7 @@ def _changed_area(job: Job | None, image: Path | None):
     """The "Changed area" image of a masked future (add-object-masking): the future with
     the unchanged part dimmed. A hidden, empty update for other tiles."""
     hidden = gr.update(value=None, visible=False)
-    if job is None or image is None or not job.params.get("object_query"):
+    if job is None or image is None or not futures.is_limited(job.params):
         return hidden
     dest = _local("thumbs", "changed", f"{job.job_id}.jpg")
     if not dest.is_file():
@@ -1607,9 +1615,54 @@ def on_manage_viewpoint(action: str, scene_id, vp_id, name):
             gr.update(value=items, label=label), keys]  # fmt: skip
 
 
+def _area_key(vp_id: str | None, parent_id: str | None) -> str | None:
+    """Which start image an area is drawn on: the parent future's, else the view's."""
+    if parent_id:
+        return f"future:{parent_id}"
+    return f"view:{vp_id}" if vp_id else None
+
+
+def on_area_load(scene_id, vp_id, parent_id):
+    """Show the next future's start image in the area editor, with no area drawn
+    (add-area-layout). Outputs: editor, start key, area PNG, note."""
+    empty = [None, None, None, AREA_HINT]
+    if not scene_id:
+        return empty
+    job = _future_job(parent_id)
+    if job is not None:
+        image, what = _future_image(job), f"the future *{futures.caption(job)}*"
+    elif vp_id and _setup(scene_id).get(vp_id) is not None:
+        image, what = _view_render(scene_id, vp_id), f"**{_setup(scene_id).get(vp_id).name}**"
+    else:
+        return empty
+    if image is None:
+        return [None, None, None, "This view has no stored image yet; make one future first."]
+    value = {"background": str(image), "layers": [], "composite": str(image)}
+    note = f"Paint on {what}. {AREA_HINT}"
+    return [value, _area_key(vp_id, parent_id), None, note]
+
+
+def on_area_change(value, area_on):
+    """The painted area as a PNG (None when nothing is painted). Outputs: area PNG, note."""
+    if not value or not area_on:
+        return None, AREA_HINT
+    layers = list(value.get("layers") or [])
+    background = value.get("background")
+    size = None
+    if background is not None and getattr(background, "ndim", 0) >= 2:
+        size = (background.shape[1], background.shape[0])
+    hard = area.from_layers(layers, size)
+    if not hard.any():
+        return None, AREA_HINT
+    note = f"Area: {hard.mean():.0%} of the view. Only it changes (FLUX.1 Kontext editor)."
+    if hard.mean() < area.MIN_COVER:
+        note = "The area is too small; paint a larger part of the view."
+    return area.to_png(hard), note
+
+
 def on_make_future(
     camera_json, scene_id, starter_label, prompt, object_query, seed, speed, vp_id, parent_id,
-    number,
+    number, area_png=None, area_on=None,
 ):  # fmt: skip
     """Start a future. From the selected view while the viewer is at it (or from the
     parent future's view when building on one); otherwise the current view is saved as
@@ -1634,18 +1687,25 @@ def on_make_future(
             vp = viewpoints.add_viewpoint(setup, None, number, camera, target)
             _save_setup(scene_id, setup)
             note = f" Saved the current view as **{vp.name}** (v{number})."
+    hard = area.from_png(area_png) if area_png else None
+    if hard is not None and hard.any() and area_on != _area_key(vp.id, parent_id):
+        raise gr.Error(
+            "The area was drawn on another image than this future starts from. Click the "
+            "saved view (or 'Start from this') again and redraw the area, or clear it."
+        )
     starter = next((s for s in setup.starters if s.label == starter_label), None)
     try:
         text = futures.compose_prompt(starter, prompt)
         params = futures.future_params(
             vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor,
-            speed, object_query,
+            speed, object_query, area_mask=hard,
         )  # fmt: skip
     except futures.FutureError as e:
         raise gr.Error(str(e)) from e
     job = PREVIEWS.create_preview(
         text, _version_path(scene_id, vp.version), vp.camera, seed=int(seed or 0), future=params,
         input_path=f"previews/{parent.job_id}/preview.png" if parent else None,
+        area_png=area_png if params.get("area") else None,
     )  # fmt: skip
     strip, ids = _strip(scene_id)
     items, keys, label = _gallery(scene_id, vp.id)
@@ -2411,6 +2471,25 @@ def build() -> gr.Blocks:
                                     fu_detect = gr.Button(
                                         "Detect objects", scale=1, min_width=120
                                     )  # fmt: skip
+                                with gr.Accordion(
+                                    "Area to change (optional): paint where the change goes",
+                                    open=False,
+                                ) as fu_area_box:
+                                    fu_area = gr.ImageEditor(
+                                        label="Paint over the area; only it changes",
+                                        type="numpy", image_mode="RGBA", sources=(),
+                                        transforms=(), layers=False, height=360,
+                                        brush=gr.Brush(default_size=80, colors=[AREA_COLOUR],
+                                                       color_mode="fixed"),
+                                        eraser=gr.Eraser(default_size=80),
+                                        show_download_button=False,
+                                    )  # fmt: skip
+                                    with gr.Row(equal_height=True):
+                                        fu_area_note = gr.Markdown(AREA_HINT)
+                                        fu_area_load = gr.Button(
+                                            "Load start image (clears the area)", scale=0,
+                                            min_width=160,
+                                        )  # fmt: skip
                                 with gr.Group(visible=False) as fu_parent_group:
                                     fu_parent_note = gr.Markdown()
                                     fu_parent_clear = gr.Button("Start fresh instead", size="sm")
@@ -2484,6 +2563,9 @@ def build() -> gr.Blocks:
                                     gr.State(None),
                                 )
                                 fu_pending, fu_parent = gr.State(None), gr.State(None)
+                                # The painted area as a 1-bit PNG, and the start image
+                                # it was drawn on ("view:<id>" or "future:<job id>").
+                                fu_area_png, fu_area_on = gr.State(None), gr.State(None)
                                 fu_keys, fu_picked = gr.State([]), gr.State([])
                                 fu_shown = gr.State(None)
                                 fu_timer = gr.Timer(1, active=False)
@@ -2721,13 +2803,17 @@ def build() -> gr.Blocks:
             [fu_intro, fu_strip, fu_vp_ids, fu_vp, fu_name, fu_starter, fu_starters, fu_editor,
              fu_gallery, fu_keys, fu_picked],
         )  # fmt: skip
+        area_load = (
+            on_area_load, [picker, fu_vp, fu_parent],
+            [fu_area, fu_area_on, fu_area_png, fu_area_note],
+        )  # fmt: skip
         fu_tab.select(*fu_open)
         picker.input(*fu_open)
         fu_strip.select(
             on_pick_viewpoint,
             [picker, version, fu_vp_ids, obj_job, placing],
             [fu_vp, fu_name, fu_intro, fu_gallery, fu_keys, fu_picked, fu_move, *scene_outputs],
-        ).then(None, fu_move, None, js=SET_CAMERA_JS)
+        ).then(None, fu_move, None, js=SET_CAMERA_JS).then(*area_load)
         fu_strip_out = [fu_status, fu_strip, fu_vp_ids, fu_vp, fu_name]
         clicked(
             fu_save, "⏳ Saving…", on_save_view, [camera_json, picker, fu_name, version],
@@ -2744,7 +2830,7 @@ def build() -> gr.Blocks:
             fu_make, "⏳ Starting…", on_make_future,
             # States go last: GET_CAMERA_JS only replaces the first input.
             [camera_json, picker, fu_starter, fu_prompt, fu_object, fu_seed, fu_speed, fu_vp,
-             fu_parent, version],
+             fu_parent, version, fu_area_png, fu_area_on],
             [fu_status, fu_job, fu_vp, fu_parent, fu_parent_note, fu_strip, fu_vp_ids, fu_name,
              fu_gallery, fu_keys, fu_timer],
             js=GET_CAMERA_JS,
@@ -2774,7 +2860,9 @@ def build() -> gr.Blocks:
             lambda shown: [gr.skip()] * 2 if shown else [gr.update(value=None, visible=False)] * 2,
             fu_shown, [fu_changed, fu_detected],
         )  # fmt: skip
-        fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
+        fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group]).then(
+            *area_load
+        )
         fu_detect.click(
             on_detect_objects, [picker, fu_vp, fu_object], [fu_status, fu_detected],
             concurrency_limit=1,
@@ -2782,6 +2870,14 @@ def build() -> gr.Blocks:
         fu_parent_clear.click(
             lambda: (None, "", gr.update(visible=False)), None,
             [fu_parent, fu_parent_note, fu_parent_group],
+        ).then(*area_load)  # fmt: skip
+        # "Area to change" (add-area-layout): the editor shows the start image of the next
+        # future; a new start image clears the area drawn on the old one.
+        fu_area_load.click(*area_load)
+        fu_area_box.expand(*area_load)
+        fu_area.change(
+            on_area_change, [fu_area, fu_area_on], [fu_area_png, fu_area_note],
+            show_progress="hidden",
         )  # fmt: skip
         fu_compare.click(
             on_compare, [picker, fu_vp, fu_picked],

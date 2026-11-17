@@ -1069,6 +1069,7 @@ class _ViewRestyler:
         view_prefix: str | None = None,
         input_path: str | None = None,
         object_query: str | None = None,
+        area_png: bytes | None = None,
     ) -> dict:
         """Restyle a view; uploads preview.png to previews/<job_id>/ and returns the image.
 
@@ -1084,6 +1085,9 @@ class _ViewRestyler:
         change: it is detected and segmented in the start image first (fails with
         `object_not_found` if absent), and the editor's result is kept only inside the
         grown, feathered mask; mask.png goes up too and comes back as `mask_png`.
+        `area_png` (add-area-layout, same editors) is a painted area instead: the editor
+        gets a crop around it (`editing.area.crop_box`), and its result is kept only
+        inside the grown, feathered area; area.png and mask.png go up too.
         `camera` is `editing.preview.ViewCamera.to_dict()`.
         """
         import threading
@@ -1092,7 +1096,7 @@ class _ViewRestyler:
         from huggingface_hub import HfApi
 
         from splat_studio import models
-        from splat_studio.editing import annotate, masking
+        from splat_studio.editing import annotate, area, masking
         from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
@@ -1161,22 +1165,47 @@ class _ViewRestyler:
                 detections_jpeg = _jpeg(detected, 85)
                 log.stage("annotate", time.time() - t)
 
+            box = area_meta = None
+            if area_png:  # "Area to change" (add-area-layout)
+                if object_query:
+                    raise errors.preview_failed("an object and a drawn area were both given")
+                if self.masker is None:
+                    raise errors.preview_failed(f"{spec.name} cannot limit changes to an area")
+                t = time.time()
+                try:
+                    hard = area.check(area.from_png(area_png, image.size))
+                except area.AreaError as e:
+                    raise errors.area_empty() from e
+                removal = masking.is_removal(prompt)
+                mask = masking.soft_mask(hard, removal)
+                box = area.crop_box(hard)
+                area_meta = area.area_info(hard, box, removal)
+                files[f"{prefix}/area.png"] = masking.mask_image(hard.astype("float32"))
+                log.stage("area", time.time() - t)
+
             # With a named object, Kontext gets an explicit instruction (masking.object_prompt);
-            # `prompt` stays what the user wrote and is what info records as "prompt".
-            editor_prompt = (
-                masking.object_prompt(prompt, object_query) if mask is not None else prompt
-            )
+            # with a drawn area, one that puts the change in the middle of the crop
+            # (area.area_prompt). `prompt` stays what the user wrote and is what info
+            # records as "prompt".
+            if box is not None:
+                editor_prompt = area.area_prompt(prompt)
+            elif mask is not None:
+                editor_prompt = masking.object_prompt(prompt, object_query)
+            else:
+                editor_prompt = prompt
 
             t = time.time()
             styled = self.editor.restyle(
-                image,
-                control,
+                image.crop(box) if box else image,
+                control.crop(box) if box else control,
                 editor_prompt,
                 seed,
                 strength=strength,
                 control_scale=control_scale,
                 steps=steps,
             )
+            if box is not None:
+                styled = area.paste(image, styled, box)
             log.stage("restyle", time.time() - t)
             mask_png = None
             if mask is not None:
@@ -1208,6 +1237,7 @@ class _ViewRestyler:
                 "view_rendered": f"{view_prefix or prefix}/render.png" in files,
                 "object_query": object_query,
                 "mask": mask_meta,
+                "area": area_meta,
             }
             jpeg = _jpeg(styled)
             started.join()

@@ -192,6 +192,43 @@ def test_object_to_change_goes_to_kontext_and_shows_in_details(tmp_path: Path) -
         futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query="x" * 61)
 
 
+def test_drawn_area_is_stored_and_sent(tmp_path: Path) -> None:
+    import numpy as np
+
+    from splat_studio.editing import area
+
+    store, client = LocalStore(tmp_path), FakeClient()
+    mgr = JobManager(store, client, lambda: 10.0, prefix="previews")
+    _, vp = _setup()
+    prefix = viewpoints.view_prefix("s1", vp.id)
+    hard = np.zeros((100, 200), bool)
+    hard[10:30, 20:60] = True
+    params = futures.future_params(vp, prefix, None, "a willow", None, "flux-kontext",
+                                   area_mask=hard)  # fmt: skip
+    assert params["area"] == {"bounds": [20, 10, 60, 30], "cover": 0.04}
+    assert futures.is_limited(params) and "object_query" not in params
+    png = area.to_png(hard)
+    job = mgr.create_preview("a willow", "scenes/s1/v2", CAM, future=params, area_png=png)
+    kw = client.submitted[-1][3]
+    assert kw["area_png"] == png and kw["class_name"] == "KontextRenderer"
+    assert "area_png" not in job.params  # bytes never go into job.json
+    assert "**Area to change:** drawn, 4% of the view" in futures.details_markdown(job)
+
+    # An empty drawing is no area; a tiny one, SDXL, or an object as well are refused.
+    plain = futures.future_params(vp, prefix, None, "x", None, "flux-kontext",
+                                  area_mask=np.zeros((10, 10), bool))  # fmt: skip
+    assert "area" not in plain and not futures.is_limited(plain)
+    tiny = np.zeros((100, 100), bool)
+    tiny[0, 0] = True
+    with pytest.raises(futures.FutureError, match="too small"):
+        futures.future_params(vp, prefix, None, "x", None, "flux-kontext", area_mask=tiny)
+    with pytest.raises(futures.FutureError, match="drawn area"):
+        futures.future_params(vp, prefix, None, "x", None, "sdxl-depth", area_mask=hard)
+    with pytest.raises(futures.FutureError, match="not both"):
+        futures.future_params(vp, prefix, None, "x", None, "flux-kontext",
+                              object_query="chairs", area_mask=hard)  # fmt: skip
+
+
 def test_delete_future_removes_its_folder(tmp_path: Path) -> None:
     from dataclasses import asdict
 

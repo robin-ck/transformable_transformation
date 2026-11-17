@@ -9,6 +9,10 @@ A future is a preview job (`previews/<job_id>/`, see `jobs.py`) whose `params` a
   editor      the `models.EDITORS` key
   object_query  "Object to change" (add-object-masking): only that object may change;
               absent when none was named. run.json's `mask` holds what was found.
+  area        "Area to change" (add-area-layout): {"bounds", "cover"} of the area the
+              user painted; only that area may change. The mask itself is area.png,
+              written by the worker; run.json's `area` holds the crop. Absent when
+              none was drawn.
 Old previews have no `viewpoint` and are not futures. Pure logic, no GPU.
 """
 
@@ -17,8 +21,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
+
 from splat_studio import models
-from splat_studio.editing import annotate, masking
+from splat_studio.editing import annotate, area, masking
 
 from .jobs import FINAL, Job, JobManager
 from .viewpoints import Starter, Viewpoint
@@ -69,8 +75,12 @@ def future_params(
     editor: str | None = None,
     speed: str | None = None,
     object_query: str | None = None,
+    area_mask=None,
 ) -> dict:
-    """The future-specific fields of the preview job's `params` (see the module doc)."""
+    """The future-specific fields of the preview job's `params` (see the module doc).
+
+    `area_mask` (bool array, the painted "Area to change") limits the change to that area;
+    it cannot be combined with `object_query`."""
     spec = models.editor_spec(editor)
     if parent is not None and parent.params.get("viewpoint") != vp.id:
         raise FutureError("A future can only be built on a future of the same viewpoint.")
@@ -84,6 +94,20 @@ def future_params(
             f"{spec.name}. Leave 'Object to change' empty, or pick Kontext under Settings."
         )
     extra = {"object_query": " ".join(object_query.split())} if named else {}
+    if area_mask is not None and np.asarray(area_mask).any():
+        if named:
+            raise FutureError(
+                "Use either 'Object to change' or a drawn area, not both. Clear one of them."
+            )
+        if not spec.can_mask:
+            raise FutureError(
+                f"Only the FLUX.1 Kontext editor can limit changes to a drawn area; this "
+                f"scene uses {spec.name}. Clear the drawing, or pick Kontext under Settings."
+            )
+        try:
+            extra["area"] = area.summary(area_mask)
+        except area.AreaError as e:
+            raise FutureError(str(e)) from e
     return {
         "viewpoint": vp.id,
         "view_prefix": view_prefix,
@@ -116,6 +140,12 @@ def detect_query(editor: str | None, object_query: str | None) -> str:
             "Pick Kontext under Settings."
         )
     return " ".join(object_query.split())
+
+
+def is_limited(params: dict) -> bool:
+    """True when only part of the view could change (an object query or a drawn area),
+    so the future has a mask.png and a "Changed area" image."""
+    return bool(params.get("object_query") or params.get("area"))
 
 
 def summary(params: dict) -> str:
@@ -189,6 +219,10 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
         listed = [annotate.label_text(i, lb, sc) for i, (lb, sc) in enumerate(pairs, 1)]
         if listed:
             lines.append("**Detected:** " + " · ".join(listed))
+    if p.get("area"):
+        cover = p["area"].get("cover") or 0
+        lines.append(f"**Area to change:** drawn, {cover:.0%} of the view (the rest is "
+                     "unchanged)")  # fmt: skip
     sent = job.run.get("editor_prompt")
     if sent and sent != job.run.get("prompt"):
         lines.append(f"**Sent to the editor:** {sent}")
