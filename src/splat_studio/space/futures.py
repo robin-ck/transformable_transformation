@@ -100,6 +100,24 @@ def future_params(
     }
 
 
+def detect_query(editor: str | None, object_query: str | None) -> str:
+    """The query for "Detect objects" (add-detection-preview), whitespace normalised.
+    Raises FutureError when nothing is named or the editor cannot mask."""
+    spec = models.editor_spec(editor)
+    try:
+        named = masking.object_phrases(object_query)
+    except masking.MaskError as e:
+        raise FutureError(str(e)) from e
+    if not named:
+        raise FutureError("Type the object to look for in 'Object to change' first.")
+    if not spec.can_mask:
+        raise FutureError(
+            f"Only the FLUX.1 Kontext editor can detect objects; this scene uses {spec.name}. "
+            "Pick Kontext under Settings."
+        )
+    return " ".join(object_query.split())
+
+
 def summary(params: dict) -> str:
     """Short name of a future: the user's own text, else the starter's label."""
     own = params.get("own_prompt") or ""

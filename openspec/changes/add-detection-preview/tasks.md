@@ -21,3 +21,10 @@
   - Clean; 253 passed.
 - [ ] 4.2 (user) `modal deploy modal_app/app.py`; make a masked future and check the labelled image and caption
 - [x] 4.3 README Futures bullet
+
+## 5. Detect objects (added after PR #38)
+- [x] 5.1 Worker `detect(view_prefix, object_query)` on `_ViewRestyler`: stored render, detect, segment, labelled image; returns `detections_jpeg` and `mask`, stores nothing; test in `tests/test_preview_worker.py`
+- [x] 5.2 `modal_client.submit_detect`; `futures.detect_query` (object named, editor can mask); test
+- [x] 5.3 Space: "Detect objects" button next to "Object to change"; polls every 0.5 s (up to 240 s) and shows the labelled image under the result with its caption; `tests/test_space_detect.py` (imports `space/app.py` under its own module name, skipped without gradio)
+  - Detection runs on the selected saved view's plain render; a view whose render is still being made reports that. The status says Make future uses the same detector on the same image, except when building on a future.
+- [ ] 5.4 (user) `modal deploy modal_app/app.py` and update the Space; click Detect objects on a saved view with Kontext

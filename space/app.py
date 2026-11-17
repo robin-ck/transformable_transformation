@@ -22,7 +22,7 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio import models  # noqa: E402
-from splat_studio.editing import images, masking  # noqa: E402
+from splat_studio.editing import annotate, images, masking  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import (  # noqa: E402
@@ -1664,6 +1664,62 @@ def on_make_future(
     ]  # fmt: skip
 
 
+DETECT_TIMEOUT_S = 240  # a cold Kontext container takes about 90 s to load
+
+
+def on_detect_objects(scene_id, vp_id, object_query):
+    """ "Detect objects": find the object in the selected view's plain render, without
+    making a future (add-detection-preview). Outputs: status, detected objects image."""
+    if not scene_id:
+        raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    vp = setup.get(vp_id)
+    if vp is None:
+        raise gr.Error("Pick a saved view first: detection runs on its plain render.")
+    try:
+        query = futures.detect_query(setup.editor, object_query)
+    except futures.FutureError as e:
+        raise gr.Error(str(e)) from e
+    class_name = models.editor_spec(setup.editor).modal_class
+    try:
+        call = PREVIEWS.client.submit_detect(
+            viewpoints.view_prefix(scene_id, vp.id), query, class_name
+        )
+    except Exception as e:
+        raise gr.Error(f"Could not start the detection: {e}") from e
+    hidden = gr.update(value=None, visible=False)
+    yield f"⏳ Looking for **{query}** in the plain render of **{vp.name}**…", hidden
+    start, result = time.time(), None
+    while True:
+        try:
+            state, result = PREVIEWS.client.poll(call)
+        except Exception as e:
+            state, result = "finished", {"status": "failed", "error": {"message": repr(e)}}
+        if state == "finished":
+            break
+        if time.time() - start > DETECT_TIMEOUT_S:
+            yield "❌ The detection took too long (no free GPU?). Try again.", hidden
+            return
+        time.sleep(0.5)
+    result = result or {}
+    if result.get("status") != "done" or not result.get("detections_jpeg"):
+        err = result.get("error") or {}
+        msg = f"{err.get('message', 'The detection failed.')} {err.get('tip', '')}".strip()
+        yield f"❌ {msg}", hidden
+        return
+    # A new file name each time, so the browser does not show an earlier image.
+    path = _local("detect", scene_id, f"{vp.id}-{int(time.time() * 1000)}.jpg")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(result["detections_jpeg"])
+    caption = annotate.detections_caption((result.get("mask") or {}).get("labels") or [])
+    yield (
+        f"🔎 {caption} in the plain render of **{vp.name}** ({time.time() - start:.0f} s). "
+        "**Make future** from this view uses the same detector on the same image "
+        "(not when building on a future).",
+        gr.update(value=str(path), visible=True, label=caption),
+    )
+
+
 def _save_in_background(job: Job) -> None:
     def save() -> None:
         try:
@@ -2344,12 +2400,17 @@ def build() -> gr.Blocks:
                                     placeholder="wide reed beds and a wooden footbridge",
                                     max_length=futures.MAX_PROMPT, lines=2,
                                 )  # fmt: skip
-                                fu_object = gr.Textbox(
-                                    label="Object to change (optional)", max_lines=1,
-                                    max_length=masking.MAX_QUERY, placeholder="chairs",
-                                    info="Only that object changes; the rest of the view stays "
-                                    "exactly as it is. FLUX.1 Kontext editor only.",
-                                )  # fmt: skip
+                                with gr.Row(equal_height=True):
+                                    fu_object = gr.Textbox(
+                                        label="Object to change (optional)", max_lines=1,
+                                        max_length=masking.MAX_QUERY, placeholder="chairs",
+                                        info="Only that object changes; the rest of the view "
+                                        "stays exactly as it is. FLUX.1 Kontext editor only.",
+                                        scale=3,
+                                    )  # fmt: skip
+                                    fu_detect = gr.Button(
+                                        "Detect objects", scale=1, min_width=120
+                                    )  # fmt: skip
                                 with gr.Group(visible=False) as fu_parent_group:
                                     fu_parent_note = gr.Markdown()
                                     fu_parent_clear = gr.Button("Start fresh instead", size="sm")
@@ -2714,6 +2775,10 @@ def build() -> gr.Blocks:
             fu_shown, [fu_changed, fu_detected],
         )  # fmt: skip
         fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
+        fu_detect.click(
+            on_detect_objects, [picker, fu_vp, fu_object], [fu_status, fu_detected],
+            concurrency_limit=1,
+        )  # fmt: skip
         fu_parent_clear.click(
             lambda: (None, "", gr.update(visible=False)), None,
             [fu_parent, fu_parent_note, fu_parent_group],

@@ -117,6 +117,11 @@ def submit_view(
     return spawn_method(class_name, "render_view", scene_path, camera, out_prefix)
 
 
+def submit_detect(view_prefix: str, object_query: str, class_name: str) -> str:
+    """ "Detect objects" (add-detection-preview): detection only, on a viewpoint's render."""
+    return spawn_method(class_name, "detect", view_prefix, object_query)
+
+
 def warm_preview(class_name: str = "PreviewRenderer") -> str:
     """Start a preview container ahead of a future, so its models are loaded in time."""
     return spawn_method(class_name, "warm")

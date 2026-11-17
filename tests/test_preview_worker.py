@@ -256,3 +256,26 @@ def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
     res = render(w, "m4", "scenes/s/v1", CAM, "x", view_prefix="viewpoints/s/a",
                  object_query="chairs")  # fmt: skip
     assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]
+
+
+def test_detect_only_labels_the_plain_render_and_stores_nothing(monkeypatch) -> None:
+    masker = FakeMasker()
+    w, REPO, COMMITS, _ = _worker(monkeypatch, "KontextRenderer", RedEditor(), masker)
+    detect = type(w).detect._get_raw_f()
+    type(w).render_view._get_raw_f()(w, "scenes/s/v1", CAM, "viewpoints/s/a")
+    n = len(COMMITS)
+
+    res = detect(w, "viewpoints/s/a", " chairs ")
+    assert res["status"] == "done", res
+    assert res["detections_jpeg"][:2] == b"\xff\xd8"
+    assert res["mask"]["labels"] == ["chairs"] and res["mask"]["query"] == "chairs"
+    assert {"detect", "segment", "annotate"} <= set(res["stages"])
+    assert len(COMMITS) == n  # nothing written to the dataset
+
+    res = detect(w, "viewpoints/s/a", "boat")
+    assert res["status"] == "failed" and res["error"]["code"] == "object_not_found"
+    res = detect(w, "viewpoints/s/missing", "chairs")
+    assert res["status"] == "failed" and "no stored render" in res["error"]["tip"]
+    w.masker = None
+    res = detect(w, "viewpoints/s/a", "chairs")
+    assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]

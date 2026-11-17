@@ -231,3 +231,11 @@ def test_detections_are_kept_listed_and_captioned(tmp_path: Path) -> None:
     other = mgr.create_preview("x", "scenes/s1/v2", CAM, future=plain)
     assert futures.detections_caption(other) is None
     assert "Detected" not in futures.details_markdown(other)
+
+
+def test_detect_query_needs_an_object_and_a_masking_editor() -> None:
+    assert futures.detect_query("flux-kontext", "  chairs,  table ") == "chairs, table"
+    with pytest.raises(futures.FutureError, match="Type the object"):
+        futures.detect_query("flux-kontext", " ")
+    with pytest.raises(futures.FutureError, match="Only the FLUX.1 Kontext editor"):
+        futures.detect_query("sdxl-depth", "chairs")
