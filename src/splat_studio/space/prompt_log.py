@@ -58,13 +58,18 @@ def _version_number(scene_path: str | None, scene_id: str) -> int | None:
 
 
 def scene_log(
-    scene_id: str, versions: list[Version], previews: list[Job], edits: list[Job] = ()
+    scene_id: str,
+    versions: list[Version],
+    previews: list[Job],
+    edits: list[Job] = (),
+    viewpoint_names: dict[str, str] | None = None,
 ) -> list[LogEntry]:
     """All prompts for one scene, newest first.
 
     Versions (every edit that produced one), previews made from its versions, and edit
     jobs that have not (yet) produced a version: running or failed ones. A finished edit
-    is listed once, as its version.
+    is listed once, as its version. Futures (add-viewpoint-futures) are listed as
+    previews, with their viewpoint's name from `viewpoint_names` (id -> name).
     """
     entries = [LogEntry(v.created_at, v.mode, v.prompt, v.model, f"v{v.number}") for v in versions]
     for job in edits:
@@ -84,13 +89,17 @@ def scene_log(
         n = _version_number(job.params.get("scene_path"), scene_id)
         if n is None:
             continue
+        vp = job.params.get("viewpoint")
+        view = ""
+        if vp:
+            view = f' · view "{(viewpoint_names or {}).get(vp, "removed view")}"'
         entries.append(
             LogEntry(
                 job.created_at,
                 "preview",
                 job.params.get("prompt") or job.summary,
                 job.run.get("model") or job.params.get("model"),  # failed runs lack it
-                f"preview of v{n} (job {job.job_id})",
+                f"preview of v{n}{view} (job {job.job_id})",
                 job.status,
             )
         )

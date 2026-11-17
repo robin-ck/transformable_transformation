@@ -35,6 +35,10 @@ Region (task 4.4): `{type: "region_mode", on}` shows an overlay where dragging d
 a box (as fractions of the view, top left 0,0) instead of moving the camera; the
 camera reply then carries `region: [x0, y0, x1, y1]` (or null).
 
+Viewpoints (add-viewpoint-futures): `{type: "set_camera", position: [x, y, z],
+target: [x, y, z]}` moves the camera there, looking at `target` (the orbit centre),
+without reloading the scene.
+
 Last view: with a `view_key` (the scene id), the page keeps the camera position and
 orbit centre in the browser's localStorage after each move, and a scene opened
 without an explicit camera starts at that saved view. "Reset view" still goes to the
@@ -485,6 +489,16 @@ try {
     if (d.type === "region_mode") {
       area.style.display = d.on ? "block" : "none";
       if (!d.on) { region = null; drawBox(null); }
+      return;
+    }
+    if (d.type === "set_camera" && c && viewer.controls) {
+      const ok = (a) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
+      if (!ok(d.position) || !ok(d.target)) return;
+      c.up.set(...cfg.up);
+      c.position.set(...d.position);
+      viewer.controls.target.set(...d.target);
+      c.lookAt(...d.target);
+      viewer.controls.update();
       return;
     }
     if (d.type !== "get_camera" || !c || !e.source) return;

@@ -12,6 +12,8 @@ import json
 import math
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -19,6 +21,7 @@ import gradio as gr
 # On the Space, splat_studio is uploaded next to this file; locally use src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from splat_studio import models  # noqa: E402
 from splat_studio.editing import images  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
@@ -34,7 +37,7 @@ from splat_studio.editing.scene_edit import (  # noqa: E402
     region_from_viewer,
 )
 from splat_studio.reconstruction import settings as scene_settings  # noqa: E402
-from splat_studio.space import prompt_log, scenes  # noqa: E402
+from splat_studio.space import futures, prompt_log, scenes, viewpoints  # noqa: E402
 from splat_studio.space.add_object import (  # noqa: E402
     EDIT_COLUMNS,
     OBJECT_COLUMNS,
@@ -78,7 +81,7 @@ from splat_studio.space.versions import (  # noqa: E402
     version_numbers,
     view_splat,
 )
-from splat_studio.space.viewer import camera_from_json, scene_html  # noqa: E402
+from splat_studio.space.viewer import Camera, camera_from_json, scene_html  # noqa: E402
 
 
 def load_env_file(path: Path) -> None:
@@ -319,7 +322,8 @@ def log_outputs(job_id: str | None, number: int | None):
         return "", gr.update(value=[])
     previews = [j for j in PREVIEWS.list(refresh=False) if j.kind == "preview"]
     edits = [j for j in EDITS.list(refresh=False) if j.params.get("scene_id") == job_id]
-    rows = [e.row() for e in prompt_log.scene_log(job_id, versions, previews, edits)]
+    names = {v.id: v.name for v in _setup(job_id).viewpoints}
+    rows = [e.row() for e in prompt_log.scene_log(job_id, versions, previews, edits, names)]
     return prompt_log.history_markdown(versions, number), gr.update(value=rows)
 
 
@@ -471,6 +475,7 @@ def on_delete(scene_id: str | None):
     try:
         plan = _delete_plan(scene_id)
         scenes.delete_scene(STORE, plan)
+        SETUPS.pop(scene_id, None)
     except scenes.SceneError as e:
         raise gr.Error(str(e)) from e
     except Exception as e:  # e.g. the Hub refused the commit
@@ -1089,6 +1094,15 @@ GET_CAMERA_JS = """async (...args) => {
 }"""
 
 
+# Moves the viewer to a saved view (`viewer.py`, "set_camera"); the input is JSON.
+SET_CAMERA_JS = """(text) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  if (!text || !f || !f.contentWindow) return;
+  try { f.contentWindow.postMessage({type: "set_camera", ...JSON.parse(text)}, "*"); }
+  catch (err) { console.warn("set_camera", err); }
+}"""
+
+
 def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
     version = _version(scene_id, number)
     if version is None:
@@ -1191,6 +1205,498 @@ def on_pick_preview(ids: list[str] | None, evt: gr.SelectData):
     if job is not None and job.status not in ("done", "failed"):
         out[1] = job.job_id  # the 5 s poll follows it from here
     return out
+
+
+# --- Futures (add-viewpoint-futures) ---------------------------------------------------
+
+FUTURES = futures.FutureIndex(PREVIEWS)
+SETUPS: dict[str, viewpoints.Setup] = {}  # per scene; this Space is the only writer
+RUNNING: dict[str, Job] = {}  # futures this Space started, polled every second
+WARM_EVERY_S = 4 * 60  # a warm-up call keeps a container up for WARM_S (5 min) after it
+_last_warm = [0.0]
+FUTURE_HINT = (
+    "Futures are restyled images made from saved views. Move the viewer to a spot you "
+    "want to change and click **Save current view**, or just type a prompt and click "
+    "**Make future**: the current view is then saved first."
+)
+
+
+def _local(*parts: str) -> Path:
+    return Path(STORE.file_dir).joinpath(*parts)
+
+
+def _setup(scene_id: str) -> viewpoints.Setup:
+    if scene_id not in SETUPS:
+        SETUPS[scene_id] = viewpoints.load_setup(STORE, scene_id)
+    return SETUPS[scene_id]
+
+
+def _save_setup(scene_id: str, setup: viewpoints.Setup) -> None:
+    viewpoints.save_setup(STORE, scene_id, setup)
+    SETUPS[scene_id] = setup
+
+
+def _placeholder_image() -> Path:
+    """Grey tile for a viewpoint whose render is not stored yet."""
+    path = _local("thumbs", "pending.png")
+    if not path.is_file():
+        from PIL import Image, ImageDraw
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (512, 320), (31, 36, 48))
+        ImageDraw.Draw(img).text((180, 150), "rendering this view…", fill=(201, 207, 219))
+        img.save(path)
+    return path
+
+
+def _view_render(scene_id: str, vp_id: str) -> Path | None:
+    """Local copy of a viewpoint's stored render, or None if it has none (yet)."""
+    try:
+        return STORE.download(f"{viewpoints.view_prefix(scene_id, vp_id)}/render.png")
+    except Exception:
+        return None
+
+
+def _view_thumb(scene_id: str, vp_id: str) -> Path:
+    dest = _local("thumbs", "views", scene_id, f"{vp_id}.jpg")
+    if dest.is_file():
+        return dest
+    src = _view_render(scene_id, vp_id)
+    return futures.thumbnail(src, dest) if src else _placeholder_image()
+
+
+def _future_image(job: Job) -> Path | None:
+    """The future's full image: the JPEG the worker returned, else preview.png."""
+    path = _local("futures", f"{job.job_id}.jpg")
+    if path.is_file():
+        return path
+    if job.job_id in PREVIEWS.images:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(PREVIEWS.images[job.job_id])
+        return path
+    try:
+        return STORE.download(f"previews/{job.job_id}/preview.png")
+    except Exception:
+        return None
+
+
+def _future_thumb(job: Job) -> Path | None:
+    dest = _local("thumbs", "futures", f"{job.job_id}.jpg")
+    if dest.is_file():
+        return dest
+    src = _future_image(job)
+    return futures.thumbnail(src, dest) if src else None
+
+
+def _future_job(job_id: str | None) -> Job | None:
+    if not job_id:
+        return None
+    return FUTURES.final.get(job_id) or RUNNING.get(job_id) or PREVIEWS.get(job_id)
+
+
+def _strip(scene_id: str | None):
+    """The viewpoint strip: (gallery value, viewpoint ids in the same order)."""
+    if not scene_id:
+        return [], []
+    vps = _setup(scene_id).ordered()
+    items = [(str(_view_thumb(scene_id, v.id)), f"{v.name} · v{v.version}") for v in vps]
+    return items, [v.id for v in vps]
+
+
+def _gallery(scene_id: str | None, vp_id: str | None):
+    """A viewpoint's gallery: (value, tile keys, label); the plain render comes first."""
+    vp = _setup(scene_id).get(vp_id) if scene_id else None
+    if vp is None:
+        return [], [], "Futures (pick a saved view)"
+    items = [(str(_view_thumb(scene_id, vp.id)), "plain render")]
+    keys = ["render"]
+    for job in futures.viewpoint_futures(FUTURES.jobs(), vp.id):
+        thumb = _future_thumb(job)
+        if thumb:
+            items.append((str(thumb), futures.caption(job)))
+            keys.append(job.job_id)
+    n = len(keys) - 1
+    return items, keys, f'Futures of "{vp.name}" ({n}; click to show, pick two to compare)'
+
+
+def _last_used(scene_id: str, setup: viewpoints.Setup) -> str | None:
+    """The viewpoint of the newest future of the scene, else the first viewpoint."""
+    ids = {v.id for v in setup.viewpoints}
+    for job in sorted(FUTURES.jobs(), key=lambda j: j.created_at, reverse=True):
+        if futures.is_future(job) and job.params["viewpoint"] in ids:
+            return job.params["viewpoint"]
+    ordered = setup.ordered()
+    return ordered[0].id if ordered else None
+
+
+def _starter_choices(setup: viewpoints.Setup) -> list[str]:
+    return ["none", *(s.label for s in setup.starters)]
+
+
+def _warm_up() -> None:
+    """Start a preview container in the background (at most every WARM_EVERY_S)."""
+    now = time.time()
+    if now - _last_warm[0] < WARM_EVERY_S:
+        return
+    _last_warm[0] = now
+
+    def call() -> None:
+        try:
+            PREVIEWS.client.warm_preview()
+        except Exception as e:  # no Modal locally, or a deploy without `warm`
+            print(f"warm-up skipped: {e!r}")
+
+    threading.Thread(target=call, daemon=True).start()
+
+
+def on_futures_open(scene_id: str | None, vp_id: str | None):
+    """Fill the Futures sub-tab; the viewer keeps its camera.
+
+    Outputs: intro, strip, vp ids, selected vp, name, starter radio, starters text,
+    editor, gallery, tile keys, picked.
+    """
+    _warm_up()
+    if not scene_id:
+        empty = [[], [], None, "", gr.update(choices=["none"], value="none"), "", gr.skip()]
+        return ["Pick a finished scene first.", *empty, gr.update(value=[]), [], []]
+    setup = _setup(scene_id)
+    if setup.get(vp_id) is None:
+        vp_id = _last_used(scene_id, setup)
+    strip, ids = _strip(scene_id)
+    items, keys, label = _gallery(scene_id, vp_id)
+    vp = setup.get(vp_id)
+    intro = FUTURE_HINT if not ids else (
+        f"Selected view: **{vp.name}** (v{vp.version}). Pick a view to move the viewer "
+        "there. **Make future** uses the selected view while the viewer is at it, and "
+        "saves the current view as a new one when you have moved away."
+    )  # fmt: skip
+    choices = _starter_choices(setup)
+    return [
+        intro, strip, ids, vp_id, vp.name if vp else "",
+        gr.update(choices=choices, value="none"),
+        viewpoints.starters_text(setup.starters), setup.editor,
+        gr.update(value=items, label=label), keys, [],
+    ]  # fmt: skip
+
+
+def _viewer_camera(vp: viewpoints.Viewpoint) -> dict:
+    m = vp.camera["c2w"]
+    return {"position": [m[0][3], m[1][3], m[2][3]], "target": viewpoints.viewer_target(vp)}
+
+
+def on_pick_viewpoint(scene_id, number, ids, obj_job, placing, evt: gr.SelectData):
+    """A click on a saved view: select it, show its gallery and move the viewer there
+    (reopening the viewer on the view's version if another version is shown).
+
+    Outputs: selected vp, name, intro, gallery, tile keys, picked, camera message, then
+    `SCENE_OUTPUTS`.
+    """
+    i = evt.index if isinstance(evt.index, int) else evt.index[0]
+    vp = _setup(scene_id).get(ids[i]) if scene_id and ids and 0 <= i < len(ids) else None
+    if vp is None:
+        return [gr.skip()] * 17
+    items, keys, label = _gallery(scene_id, vp.id)
+    move = json.dumps(_viewer_camera(vp))
+    head = [vp.id, vp.name, f"Selected view: **{vp.name}** (v{vp.version}).",
+            gr.update(value=items, label=label), keys, []]  # fmt: skip
+    if vp.version == number:
+        return [*head, move, *[gr.skip()] * 10]
+    out = list(scene_view(scene_id, vp.version, obj_job, placing))
+    version = _version(scene_id, vp.version)
+    cam = _viewer_camera(vp)
+    out[2] = scene_html(STORE, version.path if version else None, camera=Camera(
+        tuple(cam["position"]), tuple(cam["target"])))  # fmt: skip
+    return [*head, "", *out]
+
+
+def _camera_and_target(camera_json: str | None) -> tuple[dict, list[float] | None]:
+    try:
+        camera = camera_from_viewer(camera_json).to_dict()
+    except CameraError as e:
+        raise gr.Error(str(e)) from e
+    target = json.loads(camera_json).get("target")
+    return camera, target if isinstance(target, list) and len(target) == 3 else None
+
+
+def _version_path(scene_id: str, number: int) -> str:
+    """Dataset folder of a scene version (no Hub call, unlike `_version`)."""
+    return f"scenes/{scene_id}/v{int(number)}"
+
+
+def _start_view_render(scene_id: str, vp: viewpoints.Viewpoint) -> dict | None:
+    """Render a new viewpoint on Modal; returns the pending call, or None if it failed."""
+    try:
+        call = PREVIEWS.client.submit_view(
+            _version_path(scene_id, vp.version), vp.camera, viewpoints.view_prefix(scene_id, vp.id)
+        )
+    except Exception as e:
+        print(f"view render not started: {e!r}")
+        return None
+    return {"call": call, "scene": scene_id, "vp": vp.id}
+
+
+def on_save_view(camera_json, scene_id, name, number):
+    """Save the viewer's camera as a viewpoint of the shown version and render it once.
+
+    Outputs: status, strip, vp ids, selected vp, name, intro, gallery, tile keys, pending
+    view render, timer.
+    """
+    if not scene_id or not number:
+        raise gr.Error("Pick a finished scene first.")
+    camera, target = _camera_and_target(camera_json)
+    setup = _setup(scene_id)
+    try:
+        vp = viewpoints.add_viewpoint(setup, name, number, camera, target)
+    except viewpoints.ViewpointError as e:
+        raise gr.Error(str(e)) from e
+    _save_setup(scene_id, setup)
+    pending = _start_view_render(scene_id, vp)
+    strip, ids = _strip(scene_id)
+    items, keys, label = _gallery(scene_id, vp.id)
+    msg = f'Saved this view as **{vp.name}** (v{number}). ' + (
+        "Rendering it on the GPU for its thumbnail…" if pending else
+        "The GPU could not be reached; the view is rendered with its first future."
+    )  # fmt: skip
+    return [
+        msg, strip, ids, vp.id, vp.name, f"Selected view: **{vp.name}** (v{number}).",
+        gr.update(value=items, label=label), keys, pending, gr.Timer(active=True),
+    ]  # fmt: skip
+
+
+def on_manage_viewpoint(action: str, scene_id, vp_id, name):
+    """Rename, move up/down or remove the selected viewpoint.
+
+    Outputs: status, strip, vp ids, selected vp, name, gallery, tile keys.
+    """
+    if not scene_id:
+        raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    try:
+        if action == "rename":
+            vp = viewpoints.rename_viewpoint(setup, vp_id, name)
+            msg = f"Renamed to **{vp.name}**."
+        elif action in ("up", "down"):
+            viewpoints.move_viewpoint(setup, vp_id, -1 if action == "up" else 1)
+            msg = "Moved."
+        else:
+            vp = viewpoints.remove_viewpoint(setup, vp_id)
+            vp_id = None
+            msg = f"Removed **{vp.name}** from the list; its futures are kept in the dataset."
+    except viewpoints.ViewpointError as e:
+        raise gr.Error(str(e)) from e
+    _save_setup(scene_id, setup)
+    strip, ids = _strip(scene_id)
+    items, keys, label = _gallery(scene_id, vp_id)
+    vp = setup.get(vp_id)
+    return [msg, strip, ids, vp_id, vp.name if vp else "",
+            gr.update(value=items, label=label), keys]  # fmt: skip
+
+
+def on_make_future(camera_json, scene_id, starter_label, prompt, seed, vp_id, parent_id, number):
+    """Start a future. From the selected view while the viewer is at it (or from the
+    parent future's view when building on one); otherwise the current view is saved as
+    a new viewpoint first, in the same GPU job.
+
+    Outputs: status, running future, selected vp, parent, parent note, strip, vp ids,
+    name, gallery, tile keys, timer.
+    """
+    if not scene_id or not number:
+        raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    parent = _future_job(parent_id)
+    note = ""
+    if parent is not None:
+        vp = setup.get(parent.params.get("viewpoint"))
+        if vp is None:
+            raise gr.Error("The view of that future was removed; pick another future.")
+    else:
+        camera, target = _camera_and_target(camera_json)
+        vp = setup.get(vp_id)
+        if vp is None or not viewpoints.same_view(vp.camera, camera):
+            vp = viewpoints.add_viewpoint(setup, None, number, camera, target)
+            _save_setup(scene_id, setup)
+            note = f" Saved the current view as **{vp.name}** (v{number})."
+    starter = next((s for s in setup.starters if s.label == starter_label), None)
+    try:
+        text = futures.compose_prompt(starter, prompt)
+        params = futures.future_params(
+            vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor
+        )
+    except futures.FutureError as e:
+        raise gr.Error(str(e)) from e
+    job = PREVIEWS.create_preview(
+        text, _version_path(scene_id, vp.version), vp.camera, seed=int(seed or 0), future=params,
+        input_path=f"previews/{parent.job_id}/preview.png" if parent else None,
+    )  # fmt: skip
+    strip, ids = _strip(scene_id)
+    items, keys, label = _gallery(scene_id, vp.id)
+    gallery = gr.update(value=items, label=label)
+    if job.status == "failed":
+        err = job.error or {}
+        return [f"❌ **Could not start.** {err.get('message', '')}{note}", None, vp.id,
+                parent_id, gr.skip(), strip, ids, vp.name, gallery, keys,
+                gr.Timer(active=False)]  # fmt: skip
+    RUNNING[job.job_id] = job
+    built = f" on future `{parent.job_id}`" if parent else ""
+    return [
+        f"⏳ Making a future of **{vp.name}**{built}: *{job.summary}* (job {job.job_id}).{note}",
+        job.job_id, vp.id, None, "", strip, ids, vp.name, gallery, keys,
+        gr.Timer(active=True),
+    ]  # fmt: skip
+
+
+def _save_in_background(job: Job) -> None:
+    def save() -> None:
+        try:
+            PREVIEWS.save(job)
+        except Exception as e:  # the next listing refreshes it from Modal again
+            print(f"saving job.json of {job.job_id} failed: {e!r}")
+
+    threading.Thread(target=save, daemon=True).start()
+
+
+def on_futures_tick(job_id, pending, scene_id, vp_id):
+    """Poll the running future and a new viewpoint's render (every second).
+
+    Outputs: status, running future, pending view render, result, result details,
+    "Start from this", gallery, tile keys, strip, timer.
+    """
+    out = [gr.skip()] * 10
+    view_pending, running = bool(pending), bool(job_id)
+    if pending:
+        try:
+            state, result = PREVIEWS.client.poll(pending["call"])
+        except Exception as e:
+            state, result = "finished", {"status": "failed", "error": {"message": repr(e)}}
+        if state == "finished":
+            out[2], view_pending = None, False
+            result = result or {}
+            if result.get("status") == "done" and result.get("image_jpeg"):
+                dest = _local("thumbs", "views", pending["scene"], f"{pending['vp']}.jpg")
+                raw = dest.with_suffix(".full.jpg")
+                raw.parent.mkdir(parents=True, exist_ok=True)
+                raw.write_bytes(result["image_jpeg"])
+                futures.thumbnail(raw, dest)
+            else:
+                msg = (result.get("error") or {}).get("message", "")
+                gr.Warning(f"The view could not be rendered now; its first future will. {msg}")
+            if pending["scene"] == scene_id:
+                out[8] = _strip(scene_id)[0]
+                if pending["vp"] == vp_id:
+                    items, keys, label = _gallery(scene_id, vp_id)
+                    out[6], out[7] = gr.update(value=items, label=label), keys
+    if job_id:
+        job = _future_job(job_id)
+        if job is None:
+            out[0], out[1], running = "The future's job was not found.", None, False
+        else:
+            job = PREVIEWS.refresh(job, save=False)
+            RUNNING[job.job_id] = job
+            if job.status in ("done", "failed"):
+                running = False
+            if job.status == "failed":
+                RUNNING.pop(job.job_id, None)
+                _save_in_background(job)
+                err = job.error or {}
+                gr.Warning(f"The future failed. {err.get('message', '')}")
+                out[0] = (f"❌ **The future failed.** {err.get('message', '')} "
+                          f"{err.get('tip', '')} Click **Make future** to try again.")  # fmt: skip
+                out[1] = None
+            elif job.status == "done":
+                RUNNING.pop(job.job_id, None)
+                FUTURES.put(job)
+                image = _future_image(job)  # the returned JPEG: no Hub round trip
+                _save_in_background(job)
+                took = format_elapsed(job.elapsed(PREVIEWS.clock()))
+                setup = _setup(scene_id) if scene_id else viewpoints.Setup()
+                vp = setup.get(job.params.get("viewpoint"))
+                out[0] = f"✅ Future ready {took} after the click."
+                out[1] = None
+                out[3] = str(image) if image else None
+                out[4] = futures.details_markdown(job, vp.name if vp else None)
+                out[5] = gr.update(interactive=True)
+                if scene_id and vp:
+                    items, keys, label = _gallery(scene_id, vp.id)
+                    out[6], out[7] = gr.update(value=items, label=label), keys
+                    out[8] = _strip(scene_id)[0]  # a new view's render now exists
+            else:
+                label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
+                elapsed = format_elapsed(job.elapsed(PREVIEWS.clock()))
+                out[0] = f"{label}: **{job.summary}** ({elapsed})"
+    out[9] = gr.Timer(active=running or view_pending)
+    return out
+
+
+def _tile_image(scene_id: str, vp_id: str, key: str) -> tuple[Path | None, str]:
+    """Full image and details of a gallery tile ("render" or a future's job id)."""
+    vp = _setup(scene_id).get(vp_id)
+    if key == "render":
+        what = f"**Plain render** of **{vp.name}** (v{vp.version})" if vp else "Plain render"
+        return _view_render(scene_id, vp_id), what
+    job = _future_job(key)
+    if job is None:
+        return None, "This future was not found."
+    return _future_image(job), futures.details_markdown(job, vp.name if vp else None)
+
+
+def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
+    """A click on a gallery tile: show it large, and keep it as one of the two to compare.
+
+    Outputs: result, result details, "Start from this", shown tile, picked, compare note.
+    """
+    i = evt.index if isinstance(evt.index, int) else evt.index[0]
+    if not keys or not 0 <= i < len(keys):
+        return [gr.skip()] * 6
+    key = keys[i]
+    image, details = _tile_image(scene_id, vp_id, key)
+    picked = [k for k in (picked or []) if k != key][-1:] + [key]
+    names = ["plain render" if k == "render" else f"`{k}`" for k in picked]
+    note = "Picked to compare: " + " and ".join(names)
+    if len(picked) < 2:
+        note += " (pick one more)"
+    return [str(image) if image else None, details,
+            gr.update(interactive=key != "render"), key, picked, note]  # fmt: skip
+
+
+def on_start_from(shown: str | None):
+    """ "Start from this": the next Make restyles the shown future's image.
+
+    Outputs: parent, parent note, clear button.
+    """
+    job = _future_job(shown) if shown and shown != "render" else None
+    if job is None:
+        raise gr.Error("Pick a future in the gallery first.")
+    note = (f"**Building on** *{futures.caption(job)}* (`{job.job_id}`): the next **Make "
+            "future** restyles that image with your new prompt.")  # fmt: skip
+    return job.job_id, note, gr.update(visible=True)
+
+
+def on_compare(scene_id, vp_id, picked):
+    """Show the two picked tiles side by side. Outputs: row, image A, text A, image B, text B."""
+    if not picked or len(picked) < 2:
+        raise gr.Error("Pick two tiles in the gallery first (a future, or the plain render).")
+    (a, da), (b, db) = (_tile_image(scene_id, vp_id, k) for k in picked[-2:])
+    return gr.update(visible=True), str(a) if a else None, da, str(b) if b else None, db
+
+
+def on_save_future_settings(scene_id, text, editor):
+    """Save the scene's starter directions and editor. Outputs: status, starter radio."""
+    if not scene_id:
+        raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    try:
+        setup.starters = viewpoints.parse_starters(text, setup.starters)
+        viewpoints.set_editor(setup, editor)
+    except viewpoints.ViewpointError as e:
+        raise gr.Error(str(e)) from e
+    _save_setup(scene_id, setup)
+    n = len(setup.starters)
+    msg = (
+        f"Saved {n} starter direction{'s' if n != 1 else ''}; editor "
+        f"{models.editor_spec(setup.editor).name}. Earlier futures keep the text they were "
+        "made with."
+    )
+    return msg, gr.update(choices=_starter_choices(setup), value="none")
 
 
 # --- Image editing tab ----------------------------------------------------------------
@@ -1372,7 +1878,7 @@ CSS = """
 button { transition: transform 60ms ease, filter 60ms ease; }
 button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); }
 button:disabled { cursor: progress !important; }
-#placement-bridge, #camera-bridge { display: none !important; }
+#placement-bridge, #camera-bridge, #futures-camera-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
 #history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr,
 #previews-table tbody tr { cursor: pointer; }
@@ -1606,6 +2112,90 @@ def build() -> gr.Blocks:
                                     label="Earlier previews of this scene (click one to show it)",
                                 )  # fmt: skip
                                 pv_ids = gr.State([])
+                            with gr.Tab("Futures") as fu_tab:
+                                fu_intro = gr.Markdown(FUTURE_HINT)
+                                fu_strip = gr.Gallery(
+                                    label="Saved views (click one to go there)",
+                                    columns=4, height=200, object_fit="cover",
+                                    allow_preview=False, elem_id="futures-views",
+                                )  # fmt: skip
+                                with gr.Row(equal_height=True):
+                                    fu_name = gr.Textbox(
+                                        label="View name", max_lines=1,
+                                        max_length=viewpoints.MAX_NAME,
+                                        placeholder="bridge, east bank, bird's-eye…", scale=3,
+                                    )  # fmt: skip
+                                    fu_save = gr.Button("Save current view", scale=2)
+                                with gr.Accordion("Change the selected view", open=False):
+                                    with gr.Row():
+                                        fu_rename = gr.Button("Rename (to the name above)")
+                                        fu_up = gr.Button("Move up", min_width=80)
+                                        fu_down = gr.Button("Move down", min_width=80)
+                                        fu_remove = gr.Button("Remove", variant="stop")
+                                fu_starter = gr.Radio(
+                                    ["none"], value="none", label="Starter direction",
+                                    info="Its text goes before yours.",
+                                )  # fmt: skip
+                                fu_prompt = gr.Textbox(
+                                    label="What changes (English)",
+                                    placeholder="wide reed beds and a wooden footbridge",
+                                    max_length=futures.MAX_PROMPT, lines=2,
+                                )  # fmt: skip
+                                with gr.Group(visible=False) as fu_parent_group:
+                                    fu_parent_note = gr.Markdown()
+                                    fu_parent_clear = gr.Button("Start fresh instead", size="sm")
+                                with gr.Row():
+                                    fu_seed = gr.Number(label="Seed", value=0, precision=0)
+                                    fu_make = gr.Button("Make future", variant="primary")
+                                fu_status = gr.Markdown()
+                                fu_result = gr.Image(
+                                    label="Future (download with the arrow)",
+                                    interactive=False, format="jpeg", height=360,
+                                )  # fmt: skip
+                                fu_details = gr.Markdown()
+                                fu_from = gr.Button("Start from this", interactive=False)
+                                fu_gallery = gr.Gallery(
+                                    label="Futures (pick a saved view)", columns=3,
+                                    height=320, object_fit="cover", allow_preview=False,
+                                    elem_id="futures-gallery",
+                                )  # fmt: skip
+                                with gr.Row(equal_height=True):
+                                    fu_pick_note = gr.Markdown()
+                                    fu_compare = gr.Button("Compare", scale=0, min_width=120)
+                                with gr.Row(visible=False, equal_height=False) as fu_cmp:
+                                    with gr.Column():
+                                        fu_cmp_a = gr.Image(
+                                            interactive=False, height=300, show_label=False
+                                        )
+                                        fu_cmp_a_md = gr.Markdown()
+                                    with gr.Column():
+                                        fu_cmp_b = gr.Image(
+                                            interactive=False, height=300, show_label=False
+                                        )
+                                        fu_cmp_b_md = gr.Markdown()
+                                with gr.Accordion("Settings: starters and editor", open=False):
+                                    fu_starters = gr.Textbox(
+                                        label="Starter directions (one per line, "
+                                        '"label: prompt text")', lines=6,
+                                    )  # fmt: skip
+                                    fu_editor = gr.Dropdown(
+                                        [(e.name, k) for k, e in models.EDITORS.items()],
+                                        value=models.DEFAULT_EDITOR, label="Editor",
+                                    )  # fmt: skip
+                                    fu_settings_save = gr.Button("Save settings")
+                                fu_vp, fu_vp_ids, fu_job = (
+                                    gr.State(None),
+                                    gr.State([]),
+                                    gr.State(None),
+                                )
+                                fu_pending, fu_parent = gr.State(None), gr.State(None)
+                                fu_keys, fu_picked = gr.State([]), gr.State([])
+                                fu_shown = gr.State(None)
+                                fu_timer = gr.Timer(1, active=False)
+                                fu_move = gr.Textbox(
+                                    elem_id="futures-camera-bridge", show_label=False,
+                                    container=False,
+                                )  # fmt: skip
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
@@ -1820,6 +2410,65 @@ def build() -> gr.Blocks:
             pv_ids,
             [pv_status, preview_job, preview_col, preview_img, render_img],
         )
+
+        # Futures (add-viewpoint-futures)
+        fu_open = (
+            on_futures_open, [picker, fu_vp],
+            [fu_intro, fu_strip, fu_vp_ids, fu_vp, fu_name, fu_starter, fu_starters, fu_editor,
+             fu_gallery, fu_keys, fu_picked],
+        )  # fmt: skip
+        fu_tab.select(*fu_open)
+        picker.input(*fu_open)
+        fu_strip.select(
+            on_pick_viewpoint,
+            [picker, version, fu_vp_ids, obj_job, placing],
+            [fu_vp, fu_name, fu_intro, fu_gallery, fu_keys, fu_picked, fu_move, *scene_outputs],
+        ).then(None, fu_move, None, js=SET_CAMERA_JS)
+        fu_strip_out = [fu_status, fu_strip, fu_vp_ids, fu_vp, fu_name]
+        clicked(
+            fu_save, "⏳ Saving…", on_save_view, [camera_json, picker, fu_name, version],
+            [*fu_strip_out, fu_intro, fu_gallery, fu_keys, fu_pending, fu_timer],
+            js=GET_CAMERA_JS,
+        )  # fmt: skip
+        for button, action in ((fu_rename, "rename"), (fu_up, "up"), (fu_down, "down"),
+                               (fu_remove, "remove")):  # fmt: skip
+            button.click(
+                lambda s, v, n, a=action: on_manage_viewpoint(a, s, v, n),
+                [picker, fu_vp, fu_name], [*fu_strip_out, fu_gallery, fu_keys],
+            )  # fmt: skip
+        clicked(
+            fu_make, "⏳ Starting…", on_make_future,
+            # States go last: GET_CAMERA_JS only replaces the first input.
+            [camera_json, picker, fu_starter, fu_prompt, fu_seed, fu_vp, fu_parent, version],
+            [fu_status, fu_job, fu_vp, fu_parent, fu_parent_note, fu_strip, fu_vp_ids, fu_name,
+             fu_gallery, fu_keys, fu_timer],
+            js=GET_CAMERA_JS,
+        ).then(lambda p: gr.update(visible=bool(p)), fu_parent, fu_parent_group)  # fmt: skip
+        fu_timer.tick(
+            on_futures_tick, [fu_job, fu_pending, picker, fu_vp],
+            [fu_status, fu_job, fu_pending, fu_result, fu_details, fu_from, fu_gallery,
+             fu_keys, fu_strip, fu_timer],
+            concurrency_limit=1, show_progress="hidden",
+        )  # fmt: skip
+        # A started or finished future adds a line to the prompt log.
+        fu_job.change(*log)
+        fu_gallery.select(
+            on_pick_tile, [picker, fu_vp, fu_keys, fu_picked],
+            [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note],
+        )  # fmt: skip
+        fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
+        fu_parent_clear.click(
+            lambda: (None, "", gr.update(visible=False)), None,
+            [fu_parent, fu_parent_note, fu_parent_group],
+        )  # fmt: skip
+        fu_compare.click(
+            on_compare, [picker, fu_vp, fu_picked],
+            [fu_cmp, fu_cmp_a, fu_cmp_a_md, fu_cmp_b, fu_cmp_b_md],
+        )  # fmt: skip
+        clicked(
+            fu_settings_save, "⏳ Saving…", on_save_future_settings,
+            [picker, fu_starters, fu_editor], [fu_status, fu_starter],
+        )  # fmt: skip
 
         # Image editing
         mode_outputs = [im_source, im_aspect, im_strength, im_keep]

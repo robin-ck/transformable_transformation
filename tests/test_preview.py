@@ -164,3 +164,8 @@ def test_preview_job_lives_under_previews_and_never_touches_scenes(tmp_path: Pat
 def test_viewer_answers_camera_requests() -> None:
     doc = viewer.viewer_document("/f.splat", viewer.Camera((0, -3, 1), (0, 0, 0)))
     assert '"get_camera"' in doc and "matrixWorld.elements" in doc
+
+
+def test_viewer_moves_its_camera_on_request() -> None:
+    doc = viewer.viewer_document("/f.splat", viewer.Camera((0, -3, 1), (0, 0, 0)))
+    assert '"set_camera"' in doc and "controls.target.set(...d.target)" in doc
