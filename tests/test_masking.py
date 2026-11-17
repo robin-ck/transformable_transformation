@@ -100,3 +100,19 @@ def test_masker_builds_without_loading_models():
     m = masking.ObjectMasker(models.MASK_DETECTOR, models.MASK_SEGMENTER)
     assert m.detector is None and m.sam is None
     assert m.labels == [models.MASK_DETECTOR.label, models.MASK_SEGMENTER.label]
+
+
+def test_object_prompt_names_the_object_and_what_to_keep():
+    p = masking.object_prompt("make it green", "chair")
+    assert p.startswith("make the chair green. ")
+    assert "texture" in p and "Keep everything else unchanged." in p
+    p = masking.object_prompt("Paint them red.", "Chairs, the table")
+    assert p.startswith("Paint the chairs and the table red. ")
+    p = masking.object_prompt("delete the TV in the background", "TV")
+    assert p.startswith("delete the TV in the background. Fill the space where the tv stood")
+    assert masking.object_prompt("more colourful", "bench").startswith(
+        "more colourful (the bench). "
+    )
+    assert masking.object_prompt("make this chair blue", "chair").startswith(
+        "make this chair blue. "
+    )
