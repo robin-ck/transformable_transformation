@@ -6,7 +6,7 @@ If MVP task 5.3 (object merge on Modal) is done first or in parallel, keep the s
 
 ## 1. Layout
 - [x] 1.1 Split `build()` into New scene and Scene tabs; viewer left, tool sub-tabs (History, Add object, Preview, Edit scene) right; downloads under the viewer
-- [x] 1.2 Pick the start tab on load (Scene if a finished scene exists, opened at its newest version)
+- [x] 1.2 Pick the start tab on load (Scene if a finished scene exists, opened at its base version)
 - [x] 1.3 Finished-job notice (`gr.Info`) for reconstructions and scene edits; open a scene by picking it in the "Finished scene" list (the "Open newest scene" button was dropped); a finished edit offers its new version
 - [ ] 1.4 Check locally: switching tools keeps scene, version, camera, a running placement and a running edit's progress line
 
