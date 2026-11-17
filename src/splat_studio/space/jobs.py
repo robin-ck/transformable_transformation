@@ -15,11 +15,15 @@ as the next version under `scenes/`, and its run log names it (`version`).
 Image jobs (Image editing tab) live under `images/<job_id>/` with `result.png`; an
 uploaded input image goes to `images/<job_id>/input/source.<ext>`. A base image saved
 without a GPU step is stored as-is as `images/<job_id>/result.<ext>`.
+A reconstruction job's `job.json` also holds the scene's `name` and `notes`, which the
+user can change; deleting a scene removes its folders (see `scenes.py`).
 """
 
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import time
 import uuid
 from collections.abc import Callable
@@ -40,6 +44,19 @@ OBJECT_TIMEOUT_S = 15 * 60  # keep in sync with modal_app/app.py
 PREVIEW_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
 EDIT_TIMEOUT_S = 30 * 60  # keep in sync with modal_app/app.py
 IMAGE_TIMEOUT_S = 10 * 60  # keep in sync with modal_app/app.py
+_FOLDER = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$")  # e.g. "scenes/<job_id>"
+
+
+def check_folders(folders: list[str]) -> list[str]:
+    """Folders that `Store.delete_folders` may remove: exactly `<top>/<job id>`.
+
+    Guards against an empty or odd id deleting a whole top-level folder.
+    """
+    for f in folders:
+        name = f.rsplit("/", 1)[-1]
+        if not _FOLDER.match(f) or name in {".", ".."}:
+            raise ValueError(f"refusing to delete {f!r}: not a <top>/<job id> folder")
+    return list(folders)
 
 
 class Store(Protocol):
@@ -50,6 +67,7 @@ class Store(Protocol):
     def read_json(self, path: str) -> dict | None: ...
     def list_dirs(self, prefix: str) -> list[str]: ...
     def download(self, path: str) -> Path | None: ...
+    def delete_folders(self, folders: list[str], message: str) -> None: ...
 
 
 class LocalStore:
@@ -80,6 +98,10 @@ class LocalStore:
     def download(self, path: str) -> Path | None:
         target = self.root / path
         return target if target.is_file() else None
+
+    def delete_folders(self, folders: list[str], message: str = "") -> None:
+        for folder in check_folders(folders):
+            shutil.rmtree(self.root / folder, ignore_errors=True)
 
     @property
     def file_dir(self) -> Path:
@@ -151,6 +173,25 @@ class HubStore:
             return None
         return Path(local)
 
+    def delete_folders(self, folders: list[str], message: str = "") -> None:
+        """Delete whole folders in one commit, then their local copies.
+
+        The files stay in the dataset's git history (see the Hub's repo settings to
+        squash it)."""
+        from huggingface_hub import CommitOperationDelete
+
+        folders = check_folders(folders)
+        if not folders:
+            return
+        ops = [CommitOperationDelete(path_in_repo=f"{f}/", is_folder=True) for f in folders]
+        self.api.create_commit(
+            self.repo_id, ops, commit_message=message or "delete", repo_type="dataset"
+        )
+        meta = self.file_dir / ".cache" / "huggingface" / "download"
+        for f in folders:
+            shutil.rmtree(self.file_dir / f, ignore_errors=True)
+            shutil.rmtree(meta / f, ignore_errors=True)
+
 
 @dataclass
 class Job:
@@ -165,6 +206,8 @@ class Job:
     error: dict[str, str] | None = None
     run: dict[str, Any] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)  # e.g. prompt, seed, scene
+    name: str | None = None  # scenes only: set by the user, shown instead of the job id
+    notes: str = ""  # scenes only: free text from the user
 
     def elapsed(self, now: float) -> float:
         return (self.finished_at or now) - self.created_at

@@ -69,16 +69,15 @@ def _shorten(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def version_numbers(store: Store, scene_id: str) -> list[int]:
+    """Numbers of a scene's versions, newest first (one folder listing, no metadata)."""
+    dirs = store.list_dirs(f"scenes/{scene_id}")
+    return sorted((int(m.group(1)) for d in dirs if (m := _VERSION_DIR.match(d))), reverse=True)
+
+
 def list_versions(store: Store, scene_id: str, v1_created_at: float | None = None) -> list[Version]:
     """All versions of a scene, newest first."""
-    numbers = sorted(
-        (
-            int(m.group(1))
-            for d in store.list_dirs(f"scenes/{scene_id}")
-            if (m := _VERSION_DIR.match(d))
-        ),
-        reverse=True,
-    )
+    numbers = version_numbers(store, scene_id)
     out = []
     placements: dict[tuple, dict] = {}  # (id, object job) -> placement, for old entries
     metas = {n: store.read_json(f"scenes/{scene_id}/v{n}/version.json") or {} for n in numbers}

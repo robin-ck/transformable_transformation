@@ -34,7 +34,7 @@ from splat_studio.editing.scene_edit import (  # noqa: E402
     region_from_viewer,
 )
 from splat_studio.reconstruction import settings as scene_settings  # noqa: E402
-from splat_studio.space import prompt_log  # noqa: E402
+from splat_studio.space import prompt_log, scenes  # noqa: E402
 from splat_studio.space.add_object import (  # noqa: E402
     EDIT_COLUMNS,
     OBJECT_COLUMNS,
@@ -48,6 +48,7 @@ from splat_studio.space.add_object import (  # noqa: E402
 )
 from splat_studio.space.jobs import (  # noqa: E402
     EDIT_TIMEOUT_S,
+    FINAL,
     IMAGE_TIMEOUT_S,
     OBJECT_TIMEOUT_S,
     PREVIEW_TIMEOUT_S,
@@ -74,6 +75,7 @@ from splat_studio.space.versions import (  # noqa: E402
     history_rows,
     list_versions,
     version_from_row,
+    version_numbers,
     view_splat,
 )
 from splat_studio.space.viewer import camera_from_json, scene_html  # noqa: E402
@@ -147,8 +149,9 @@ def jobs_table(jobs: list[Job] | None = None) -> list[list[str]]:
             details = f"Scene ready: {j.scene_path}"
         else:
             details = ""
+        what = f"{j.name} · {j.summary}" if j.name else j.summary
         rows.append(
-            [j.job_id, j.summary, settings_label(j), STATUS_LABEL.get(j.status, j.status),
+            [j.job_id, what, settings_label(j), STATUS_LABEL.get(j.status, j.status),
              format_elapsed(j.elapsed(now)), details]
         )  # fmt: skip
     return rows
@@ -229,7 +232,7 @@ def scene_choices(jobs: list[Job]) -> list[tuple[str, str]]:
     putting a new scene first made it look selected and picking it did nothing.
     """
     done = [j for j in jobs if j.status == "done"]
-    return [(f"{j.job_id} · {j.summary}", j.job_id) for j in reversed(done)]
+    return [(scenes.choice_label(j), j.job_id) for j in reversed(done)]
 
 
 def refresh_all(current: str | None):
@@ -373,11 +376,110 @@ def on_tick(current: str | None, seen: list[str] | None):
         for job in jobs:
             if job.job_id in set(done) - set(seen):
                 gr.Info(
-                    f"Scene {job.job_id} ({job.summary}) is ready. "
+                    f"Scene {job.job_id} ({scenes.scene_title(job)}) is ready. "
                     "Pick it in the 'Finished scene' list of the Scene tab to view it.",
                     duration=15,
                 )
     return jobs_table(jobs), picker, done
+
+
+# --- scene details: name, notes, delete (manage-scenes) -----------------------------
+
+
+def on_details(scene_id: str | None):
+    """Scene details of the picked scene; closes a pending delete question.
+
+    Outputs: facts, name, notes, confirm group, status.
+    """
+    job = JOBS.get(scene_id) if scene_id else None
+    if job is None or job.status != "done":
+        return scenes.details_markdown(None, 0), "", "", gr.update(visible=False), ""
+    n = len(version_numbers(STORE, job.job_id))
+    facts = scenes.details_markdown(job, n, settings_label(job))
+    return facts, job.name or "", job.notes, gr.update(visible=False), ""
+
+
+def on_save_details(scene_id: str | None, name: str | None, notes: str | None):
+    """Save name and notes. Outputs: status, picker, name, notes, scene id.
+
+    The picker gets the new labels with no value: Gradio's dropdown keeps showing the
+    old label while its value stays the same, so the next step sets it to the scene id.
+    """
+    try:
+        job = scenes.set_details(JOBS, scene_id, name, notes)
+    except scenes.SceneError as e:
+        raise gr.Error(str(e)) from e
+    choices = scene_choices(JOBS.list(refresh=False))
+    return (
+        f"✅ Saved. The scene is now listed as **{scenes.choice_label(job)}**.",
+        gr.update(choices=choices, value=None),
+        job.name or "",
+        job.notes,
+        job.job_id,
+    )
+
+
+def _delete_plan(scene_id: str | None) -> scenes.DeletePlan:
+    """What deleting the scene removes; unfinished jobs are updated from Modal first."""
+    job = JOBS.get(scene_id) if scene_id else None
+    if job is None or job.status != "done":
+        raise scenes.SceneError("Pick a finished scene first.")
+
+    def updated(manager: JobManager, jobs: list[Job]) -> list[Job]:
+        return [j if j.status in FINAL else manager.refresh(j) for j in jobs]
+
+    def of_scene(manager: JobManager) -> list[Job]:
+        jobs = manager.list(refresh=False)
+        return updated(manager, [j for j in jobs if j.params.get("scene_id") == job.job_id])
+
+    previews = prompt_log.scene_previews(job.job_id, PREVIEWS.list(refresh=False))
+    return scenes.delete_plan(
+        job.job_id,
+        len(version_numbers(STORE, job.job_id)),
+        objects=of_scene(OBJECTS),
+        previews=updated(PREVIEWS, previews),
+        edits=of_scene(EDITS),
+    )
+
+
+def on_delete_ask(scene_id: str | None):
+    """First click on Delete: say what goes and ask again. Outputs: confirm group, text."""
+    try:
+        plan = _delete_plan(scene_id)
+        plan.check()
+    except scenes.SceneError as e:
+        raise gr.Error(str(e)) from e
+    job = JOBS.get(scene_id)
+    title = scenes.choice_label(job) if job else scene_id
+    return gr.update(visible=True), (
+        f"⚠️ Delete **{title}** for good? This removes its {plan.summary()} from the "
+        "dataset, and the Space cannot bring them back. Images from the Image editing "
+        "tab are kept."
+    )
+
+
+def on_delete(scene_id: str | None):
+    """Delete the scene and open the newest remaining one.
+
+    Outputs: status, confirm group, jobs table, picker, seen.
+    """
+    try:
+        plan = _delete_plan(scene_id)
+        scenes.delete_scene(STORE, plan)
+    except scenes.SceneError as e:
+        raise gr.Error(str(e)) from e
+    except Exception as e:  # e.g. the Hub refused the commit
+        raise gr.Error(f"The scene could not be deleted ({type(e).__name__}: {e})."[:300]) from e
+    jobs = JOBS.list()
+    choices = scene_choices(jobs)
+    newest = choices[-1][1] if choices else None
+    return (
+        f"🗑️ Deleted scene `{scene_id}` ({plan.summary()}).",
+        gr.update(visible=False),
+        jobs_table(jobs),
+        gr.update(choices=choices, value=newest),
+        _done_ids(jobs),
+    )
 
 
 # --- objects and edits tables ------------------------------------------------------
@@ -1331,6 +1433,33 @@ def build() -> gr.Blocks:
                         value=None,
                         allow_custom_value=True,  # choices are filled in after load
                     )
+                with gr.Accordion("Scene details (name, notes, delete)", open=False):
+                    sc_facts = gr.Markdown(scenes.details_markdown(None, 0))
+                    with gr.Row():
+                        sc_name = gr.Textbox(
+                            label="Name",
+                            max_lines=1,
+                            max_length=scenes.MAX_NAME,
+                            placeholder="e.g. Main street, before the rain gardens",
+                            info="Shown in the scene list; empty uses the job id and input.",
+                            scale=2,
+                        )
+                        sc_notes = gr.Textbox(
+                            label="Notes",
+                            lines=2,
+                            max_length=scenes.MAX_NOTES,
+                            placeholder="Where and when it was filmed, what it is for, ...",
+                            scale=3,
+                        )
+                    with gr.Row():
+                        sc_save = gr.Button("Save details", variant="primary")
+                        sc_delete = gr.Button("Delete scene…", variant="stop")
+                    with gr.Group(visible=False) as sc_confirm:
+                        sc_confirm_text = gr.Markdown()
+                        with gr.Row():
+                            sc_delete_yes = gr.Button("Yes, delete it", variant="stop")
+                            sc_delete_no = gr.Button("Cancel")
+                    sc_status = gr.Markdown()
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=3):
                         viewer = gr.HTML(scene_html(STORE, None))
@@ -1534,6 +1663,7 @@ def build() -> gr.Blocks:
             on_tables, [picker, version, hidden, moving],
             [objects_table, obj_keys, edits_table, edit_numbers],
         )  # fmt: skip
+        details = (on_details, picker, [sc_facts, sc_name, sc_notes, sc_confirm, sc_status])
 
         # New scene
         sc_quick = {"queue": False, "show_progress": "hidden"}
@@ -1553,11 +1683,26 @@ def build() -> gr.Blocks:
         # Start tab, finished-job notice, opening scenes and versions
         demo.load(on_load, [obj_job, placing], [tabs, table, picker, seen, *scene_outputs]).then(
             *pv_list
-        ).then(*log).then(*lib)
+        ).then(*log).then(*lib).then(*details)
         gr.Timer(10).tick(on_tick, [picker, seen], [table, picker, seen])
-        picker.input(on_pick_scene, [picker, obj_job, placing], scene_outputs).then(*pv_list).then(
-            *log
-        ).then(*lib)
+        open_scene = (on_pick_scene, [picker, obj_job, placing], scene_outputs)
+        picker.input(*open_scene).then(*pv_list).then(*log).then(*lib).then(*details)
+
+        # Scene details: save name and notes; delete after a second click
+        renamed = gr.State(None)  # scene id, kept while the picker is briefly emptied
+        clicked(
+            sc_save, "⏳ Saving…", on_save_details, [picker, sc_name, sc_notes],
+            [sc_status, picker, sc_name, sc_notes, renamed],
+        ).success(lambda s: gr.update(value=s), renamed, picker, queue=False)  # fmt: skip
+        clicked(sc_delete, "⏳ Checking…", on_delete_ask, picker, [sc_confirm, sc_confirm_text])
+        sc_delete_no.click(lambda: gr.update(visible=False), None, sc_confirm, queue=False)
+        clicked(
+            sc_delete_yes, "⏳ Deleting…", on_delete, picker,
+            [sc_status, sc_confirm, table, picker, seen],
+        ).success(*open_scene).then(*pv_list).then(*log).then(*lib).then(
+            # keeps the "Deleted" line in the status
+            lambda s: on_details(s)[:4], picker, [sc_facts, sc_name, sc_notes, sc_confirm]
+        )  # fmt: skip
         history_table.select(
             on_pick_row, [picker, history_table, obj_job, placing], scene_outputs
         ).then(*log).then(*lib)
