@@ -86,6 +86,51 @@ PREVIEW_DEPTH = ModelSpec(
     role="keep the scene layout via the rendered depth map",
 )
 
+
+@dataclass(frozen=True)
+class EditorSpec:
+    """A restyle editor for previews and futures (add-viewpoint-futures).
+
+    `key` is stored with every future, so keys never change once used. `modal_class` is
+    the Modal class that runs it (each editor has its own GPU and image).
+    """
+
+    key: str
+    name: str  # short, for the editor picker
+    models: tuple[ModelSpec, ...]
+    uses_depth: bool
+    modal_class: str
+
+    @property
+    def label(self) -> str:
+        """Model label as previews always stored it, e.g. 'sdxl@4621659 + controlnet@17bb979'."""
+        return " + ".join(m.label for m in self.models)
+
+    @property
+    def licence(self) -> str:
+        return " + ".join(sorted({m.licence for m in self.models}))
+
+
+EDITORS = {
+    "sdxl-depth": EditorSpec(
+        key="sdxl-depth",
+        name="SDXL + depth ControlNet",
+        models=(PREVIEW_BASE, PREVIEW_DEPTH),
+        uses_depth=True,
+        modal_class="PreviewRenderer",
+    ),
+}
+DEFAULT_EDITOR = "sdxl-depth"
+
+
+def editor_spec(key: str | None) -> EditorSpec:
+    """The registered editor for `key` (None: the default); KeyError names the known keys."""
+    key = key or DEFAULT_EDITOR
+    if key not in EDITORS:
+        raise KeyError(f"unknown editor {key!r}; registered: {', '.join(EDITORS)}")
+    return EDITORS[key]
+
+
 ALL = (
     TEXT_TO_IMAGE,
     IMAGE_TO_3D,

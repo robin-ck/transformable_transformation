@@ -60,10 +60,11 @@ How:
 - `editing/restyle.py` defines the interface, in plain Python so the Space and tests can use it:
   ```python
   class Editor(Protocol):
-      key: str              # "sdxl-depth", stored per future
-      label: str            # shown in the prompt log and gallery
-      licence: str          # checked against project.md before an editor is registered
-      uses_depth: bool      # True: gets the viewpoint's control image
+      key: str  # "sdxl-depth", stored per future
+      label: str  # shown in the prompt log and gallery
+      licence: str  # checked against project.md before an editor is registered
+      uses_depth: bool  # True: gets the viewpoint's control image
+
       def load(self) -> None: ...
       def restyle(self, image, depth, prompt: str, seed: int) -> Image: ...
   ```

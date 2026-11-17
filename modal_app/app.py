@@ -734,7 +734,7 @@ def check_edit_image() -> dict:
     return out
 
 
-PREVIEW_NEGATIVE = "blurry, low quality, distorted, deformed, oversaturated, text, watermark"
+PREVIEW_EDITOR = "sdxl-depth"  # models.EDITORS key of the editor this class runs
 VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of the view
 
 
@@ -759,20 +759,17 @@ class PreviewRenderer:
         from splat_studio.reconstruction.cost import LoadTimes
 
         self.loads = LoadTimes()
-        self.pipe = None
+        self.editor = None
         try:
             self._load_models()
         except Exception as e:  # reported by the next job, which loads again
             print(f"model load failed in enter: {e!r}")
 
     def _load_models(self) -> None:
-        import torch
-
-        from splat_studio import models
-
         t = time.time()
-        from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline
+        from splat_studio.editing import restyle
 
+        editor = restyle.make_editor(PREVIEW_EDITOR)
         self.loads.record("imports", time.time() - t)
 
         # The kernels are prebuilt in the image; this loads them and the CUDA context.
@@ -781,21 +778,8 @@ class PreviewRenderer:
         self.loads.record("warm_gsplat", time.time() - t)
 
         t = time.time()
-        controlnet = ControlNetModel.from_pretrained(
-            models.PREVIEW_DEPTH.repo_id,
-            revision=models.PREVIEW_DEPTH.revision,
-            variant="fp16",
-            use_safetensors=True,
-            torch_dtype=torch.float16,
-        )
-        self.pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-            models.PREVIEW_BASE.repo_id,
-            revision=models.PREVIEW_BASE.revision,
-            controlnet=controlnet,
-            variant="fp16",
-            use_safetensors=True,
-            torch_dtype=torch.float16,
-        ).to("cuda")
+        editor.load()
+        self.editor = editor
         models_volume.commit()  # keep downloaded weights for the next container
         self.loads.record("load_models", time.time() - t)
 
@@ -831,10 +815,10 @@ class PreviewRenderer:
         gpu = gpu_from_device_name(torch.cuda.get_device_name(0), PREVIEW_GPUS[0])
         log = RunLog(job_id=job_id, gpu=gpu)
         _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
-        model_label = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
+        model_label = models.editor_spec(PREVIEW_EDITOR).label
 
         try:
-            if self.pipe is None:
+            if self.editor is None:
                 self._load_models()  # enter failed: load here so the error is reported
             self.loads.apply(log)
             cam = preview.ViewCamera.from_dict(camera)
@@ -881,19 +865,15 @@ class PreviewRenderer:
                 raise errors.preview_empty()
 
             t = time.time()
-            styled = self.pipe(
-                prompt=prompt.strip(),
-                negative_prompt=PREVIEW_NEGATIVE,
-                image=render,
-                control_image=control,
-                strength=float(strength),
-                controlnet_conditioning_scale=float(control_scale),
-                num_inference_steps=int(steps),
-                guidance_scale=7.0,
-                width=width,
-                height=height,
-                generator=torch.Generator("cpu").manual_seed(int(seed)),
-            ).images[0]
+            styled = self.editor.restyle(
+                render,
+                control,
+                prompt,
+                seed,
+                strength=strength,
+                control_scale=control_scale,
+                steps=steps,
+            )
             log.stage("restyle", time.time() - t)
 
             info = {

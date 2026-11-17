@@ -1,9 +1,13 @@
 # Tasks: add-viewpoint-futures
 
 ## 1. Editor interface
-- [ ] 1.1 `editing/restyle.py`: `Editor` protocol and `SdxlDepthEditor` (today's SDXL + depth ControlNet call, same settings); `models.EDITORS` and `DEFAULT_EDITOR`
-- [ ] 1.2 `PreviewRenderer` uses `SdxlDepthEditor`; a preview from the Scene tab gives the same image for the same seed as before (compare one stored preview)
-- [ ] 1.3 Unit tests: registry lookup, unknown editor key, licence field present
+- [x] 1.1 `editing/restyle.py`: `Editor` protocol and `SdxlDepthEditor` (today's SDXL + depth ControlNet call, same settings); `models.EDITORS` and `DEFAULT_EDITOR`
+  - `models.EditorSpec` (key, name, models, uses_depth, `modal_class`; `label` and `licence` derived from its models) and `models.editor_spec(key)`. `restyle.make_editor(key)` builds an editor without loading it; torch and diffusers are imported only in `load`/`restyle`.
+- [x] 1.2 `PreviewRenderer` uses `SdxlDepthEditor`; a preview from the Scene tab gives the same image for the same seed as before (compare one stored preview)
+  - The pipeline call moved unchanged (same models, revisions, negative prompt, guidance 7.0, CPU generator seeded the same way, same strength/control scale/steps defaults); the stored model label is unchanged (test).
+  - **Not verified on a GPU:** the image comparison needs the deployed worker (6.2); no GPU or Modal token in this container.
+- [x] 1.3 Unit tests: registry lookup, unknown editor key, licence field present
+  - `tests/test_models.py`: 4 new tests; 213 passed.
 
 ## 2. Viewpoints
 - [ ] 2.1 `space/viewpoints.py`: read and write `viewpoints/<scene>/setup.json` (add, rename, reorder, remove viewpoints; add, edit, remove starters; editor per scene); pure logic, tests with `LocalStore`
