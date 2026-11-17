@@ -70,21 +70,35 @@ def _quaternions(r: np.ndarray) -> np.ndarray:
     return out / np.linalg.norm(out, axis=1, keepdims=True)
 
 
-def _cells(p: np.ndarray, target: int) -> np.ndarray:
-    """Cell index per Gaussian for the finest grid that gives at most `target` cells."""
+def grid_cells(p: np.ndarray, n: int) -> np.ndarray:
+    """Cell index per Gaussian (0 .. cells-1) on an n^3 grid over the bulk of `p`.
+
+    The grid spans the 0.1 to 99.9 percentile box; points outside go to border cells.
+    """
     lo, hi = np.percentile(p, 0.1, axis=0), np.percentile(p, 99.9, axis=0)
     span = float(np.max(hi - lo)) or 1.0
-    for n in GRID_SIZES:
-        ijk = np.clip(np.floor((p - lo) / (span / n)), -1, n).astype(np.int64) + 1
-        key = (ijk[:, 0] * (n + 2) + ijk[:, 1]) * (n + 2) + ijk[:, 2]
-        _, inverse = np.unique(key, return_inverse=True)
+    ijk = np.clip(np.floor((p - lo) / (span / n)), -1, n).astype(np.int64) + 1
+    key = (ijk[:, 0] * (n + 2) + ijk[:, 1]) * (n + 2) + ijk[:, 2]
+    _, inverse = np.unique(key, return_inverse=True)
+    return inverse.reshape(-1)
+
+
+def _cells(p: np.ndarray, target: int, grid_sizes: tuple[int, ...] = GRID_SIZES) -> np.ndarray:
+    """Cell index per Gaussian for the finest grid that gives at most `target` cells."""
+    for n in grid_sizes:
+        inverse = grid_cells(p, n)
         if inverse.max() + 1 <= target:
             return inverse
     return inverse  # coarsest grid; still the best we can do
 
 
-def simplify(v: np.ndarray, target: int = DEFAULT_TARGET) -> np.ndarray:
-    """Copy of Gaussians `v` merged down to at most about `target` (same fields)."""
+def simplify(
+    v: np.ndarray, target: int = DEFAULT_TARGET, grid_sizes: tuple[int, ...] = GRID_SIZES
+) -> np.ndarray:
+    """Copy of Gaussians `v` merged down to at most about `target` (same fields).
+
+    `grid_sizes` (finest first) are the grids tried; pass one size to use that grid.
+    """
     if len(v) <= target:
         return v.copy()
     p = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
@@ -94,7 +108,7 @@ def simplify(v: np.ndarray, target: int = DEFAULT_TARGET) -> np.ndarray:
     area = np.cbrt(s.prod(axis=1)) ** 2
     w = a * area
 
-    group = _cells(p, target)
+    group = _cells(p, target, grid_sizes)
     n = group.max() + 1
 
     def total(x: np.ndarray) -> np.ndarray:

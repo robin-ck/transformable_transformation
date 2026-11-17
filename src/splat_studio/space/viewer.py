@@ -45,6 +45,8 @@ from pathlib import Path
 
 import numpy as np
 
+from splat_studio.space.light import light_splat
+
 # Pinned CDN builds; keep three within the viewer's peer range (>=0.160).
 VIEWER_JS = "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
 THREE_JS = "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"
@@ -393,6 +395,9 @@ try {
     // redraws every frame, which keeps the client's GPU busy while nothing moves. A
     // dynamic scene (placing an object) still draws every frame.
     renderMode: GS.RenderMode.OnChange,
+    // Drop the page's copies of the splat data once it is on the GPU (about 140 MB per
+    // scene, whatever its size: the library's data textures are at least 4096 x 1024).
+    freeIntermediateSplatData: true,
   });
   window.splatViewer = viewer;  // for debugging from the browser console
   msg.style.display = "none";  // the viewer shows its own loading progress
@@ -517,4 +522,8 @@ def scene_html(
         obj = {"url": file_url(obj_splat), **(placement or {})}
     positions = splat_positions(splat)
     camera = camera or camera_for(positions)
-    return viewer_iframe(file_url(splat), camera, height, obj, floor_height(positions))
+    try:  # the browser gets a lighter copy of big scenes (see `light`)
+        shown = light_splat(splat, Path(store.file_dir) / "light")
+    except Exception:  # memory, disk or a bad file: show the full scene instead
+        shown = splat
+    return viewer_iframe(file_url(shown), camera, height, obj, floor_height(positions))
