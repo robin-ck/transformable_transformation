@@ -91,6 +91,35 @@ class SdxlDepthEditor:
         ).images[0]
 
 
+def allow_sdpa_without_gqa(functional: Any) -> None:
+    """Let diffusers 0.35 run on torch 2.4 (the gsplat image's torch).
+
+    diffusers' native attention always passes `enable_gqa` to
+    `scaled_dot_product_attention`, which only torch 2.5+ accepts. `functional` is
+    `torch.nn.functional`; the wrapper drops `enable_gqa=False` and refuses True.
+    Does nothing when the installed torch already accepts it, or when already wrapped.
+    """
+    import inspect
+
+    sdpa = functional.scaled_dot_product_attention
+    if getattr(sdpa, "_drops_gqa", False):
+        return
+    try:
+        if "enable_gqa" in inspect.signature(sdpa).parameters:
+            return
+    except (TypeError, ValueError):  # a builtin without a signature: check the docstring
+        if "enable_gqa" in (sdpa.__doc__ or ""):
+            return
+
+    def wrapped(*args: Any, enable_gqa: bool = False, **kwargs: Any) -> Any:
+        if enable_gqa:
+            raise NotImplementedError("enable_gqa=True needs torch 2.5 or newer")
+        return sdpa(*args, **kwargs)
+
+    wrapped._drops_gqa = True  # type: ignore[attr-defined]
+    functional.scaled_dot_product_attention = wrapped
+
+
 class FluxKontextEditor:
     """FLUX.1 Kontext dev: edits the image as the prompt instructs and keeps the rest.
 
@@ -109,6 +138,7 @@ class FluxKontextEditor:
         import torch
         from diffusers import FluxKontextPipeline
 
+        allow_sdpa_without_gqa(torch.nn.functional)
         (model,) = self.spec.models
         self.pipe = FluxKontextPipeline.from_pretrained(
             model.repo_id, revision=model.revision, torch_dtype=torch.bfloat16
