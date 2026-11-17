@@ -86,11 +86,14 @@ def submit_preview(
     view_prefix: str | None = None,
     input_path: str | None = None,
     class_name: str = "PreviewRenderer",
+    steps: int | None = None,
 ) -> str:
     """A preview, or a future when `view_prefix` names a viewpoint (add-viewpoint-futures);
     `input_path` (a parent future's preview.png) is restyled instead of the render.
-    `class_name` is the editor's Modal class (`models.EditorSpec.modal_class`)."""
-    kwargs = {k: v for k, v in (("view_prefix", view_prefix), ("input_path", input_path)) if v}
+    `class_name` is the editor's Modal class (`models.EditorSpec.modal_class`); `steps`
+    None leaves the editor's default."""
+    pairs = (("view_prefix", view_prefix), ("input_path", input_path), ("steps", steps))
+    kwargs = {k: v for k, v in pairs if v}
     return spawn_method(
         class_name,
         "render",

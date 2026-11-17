@@ -56,7 +56,7 @@ def test_future_job_records_viewpoint_starter_parent_editor(tmp_path: Path) -> N
     prompt = futures.compose_prompt(starter, "a green dike")
     job = mgr.create_preview(prompt, "scenes/s1/v2", CAM, seed=4, future=params)
     assert job.summary == "a green dike"
-    sent = {"seed": 4, "strength": 0.7, "view_prefix": prefix}
+    sent = {"seed": 4, "strength": 0.7, "view_prefix": prefix, "steps": 20}  # Fast
     assert client.submitted[-1] == (job.job_id, "scenes/s1/v2", prompt, sent)
     saved = mgr.get(job.job_id).params
     assert saved["viewpoint"] == vp.id and saved["parent"] is None
@@ -153,3 +153,11 @@ def test_data_url_for_the_viewer_overlay(tmp_path: Path) -> None:
     assert base64.b64decode(url.split(",", 1)[1]) == jpg.read_bytes()
     with Image.open(jpg) as img:
         assert img.size == (1280, 640)
+
+
+def test_speed_picks_the_editors_steps():
+    assert futures.steps_for("flux-kontext", "fast") == 20
+    assert futures.steps_for("flux-kontext", "quality") == 28
+    assert futures.steps_for(None, None) == models.editor_spec(None).fast_steps
+    with pytest.raises(futures.FutureError):
+        futures.steps_for(None, "turbo")

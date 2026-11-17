@@ -375,6 +375,8 @@ class JobManager:
         kwargs: dict[str, Any] = {}
         if future:
             kwargs["view_prefix"] = future["view_prefix"]
+            if future.get("steps"):
+                kwargs["steps"] = future["steps"]
             if spec.modal_class != "PreviewRenderer":
                 kwargs["class_name"] = spec.modal_class
         if input_path:
