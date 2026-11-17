@@ -115,6 +115,7 @@ class EditorSpec:
     models: tuple[ModelSpec, ...]
     uses_depth: bool
     modal_class: str
+    steps: int  # denoising steps per future; fewer is faster
 
     @property
     def label(self) -> str:
@@ -137,6 +138,7 @@ EDITORS = {
         models=(PREVIEW_BASE, PREVIEW_DEPTH),
         uses_depth=True,
         modal_class="PreviewRenderer",
+        steps=30,
     ),
     "flux-kontext": EditorSpec(
         key="flux-kontext",
@@ -144,6 +146,9 @@ EDITORS = {
         models=(KONTEXT,),
         uses_depth=False,
         modal_class="KontextRenderer",
+        # 30 steps took 14.7 s warm on an H100 at 1408 x 768 (2026-11-17); Kontext's
+        # default is 28. 20 steps is about a third faster, enough for local edits.
+        steps=20,
     ),
 }
 DEFAULT_EDITOR = "sdxl-depth"

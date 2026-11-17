@@ -106,3 +106,8 @@ def test_sdpa_shim_drops_false_gqa_and_refuses_true():
     g = types.SimpleNamespace(scaled_dot_product_attention=new_sdpa)
     restyle.allow_sdpa_without_gqa(g)
     assert g.scaled_dot_product_attention is new_sdpa
+
+
+def test_every_editor_sets_its_steps():
+    assert models.editor_spec("sdxl-depth").steps == 30  # unchanged for old previews
+    assert models.editor_spec("flux-kontext").steps == 20

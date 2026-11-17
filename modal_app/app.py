@@ -991,7 +991,7 @@ class _ViewRestyler:
         seed: int = 0,
         strength: float = 0.7,
         control_scale: float = 0.6,
-        steps: int = 30,
+        steps: int | None = None,
         view_prefix: str | None = None,
         input_path: str | None = None,
     ) -> dict:
@@ -1029,6 +1029,7 @@ class _ViewRestyler:
         )
         started.start()
         spec = models.editor_spec(self.EDITOR)
+        steps = int(steps or spec.steps)  # None: the editor's own default
 
         try:
             if self.editor is None:
