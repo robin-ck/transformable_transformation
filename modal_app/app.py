@@ -1104,11 +1104,17 @@ class _ViewRestyler:
                                               self.masker.labels)  # fmt: skip
                 log.stage("segment", time.time() - t)
 
+            # With a named object, Kontext gets an explicit instruction (masking.object_prompt);
+            # `prompt` stays what the user wrote and is what info records as "prompt".
+            editor_prompt = (
+                masking.object_prompt(prompt, object_query) if mask is not None else prompt
+            )
+
             t = time.time()
             styled = self.editor.restyle(
                 image,
                 control,
-                prompt,
+                editor_prompt,
                 seed,
                 strength=strength,
                 control_scale=control_scale,
@@ -1132,6 +1138,7 @@ class _ViewRestyler:
                 "model": spec.label,
                 "editor": spec.key,
                 "prompt": prompt,
+                "editor_prompt": editor_prompt,
                 "seed": seed,
                 "strength": strength,
                 "control_scale": control_scale,

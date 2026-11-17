@@ -166,6 +166,9 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
         n = (job.run.get("mask") or {}).get("detections")
         found = f" ({n} found; the rest of the view is unchanged)" if n else ""
         lines.append(f"**Object to change:** {p['object_query']}{found}")
+    sent = job.run.get("editor_prompt")
+    if sent and sent != job.run.get("prompt"):
+        lines.append(f"**Sent to the editor:** {sent}")
     model = job.run.get("model") or p.get("model")
     steps = f" · {p['steps']} steps" if p.get("steps") else ""
     lines.append(f"**Editor:** {model}{steps} · seed {p.get('seed', 0)} · job `{job.job_id}`")

@@ -228,7 +228,8 @@ def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
     assert (out[30, 20] == [255, 0, 0]).all() and (out[0, 0] == [0, 128, 0]).all()
     run = json.loads(REPO["previews/m1/run.json"])
     assert {"detect", "segment", "restyle", "composite"} <= set(run["stages"])
-    assert run["object_query"] == "chairs"
+    assert run["object_query"] == "chairs" and run["prompt"] == "make the chairs red"
+    assert run["editor_prompt"].startswith("make the chairs red. Keep the shape")
     assert run["mask"]["detections"] == 1 and run["mask"]["boxes"] == [[10, 20, 30, 40]]
     assert run["mask"]["models"] == ["det@1", "sam@2"] and run["mask"]["removal"] is False
 

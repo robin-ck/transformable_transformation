@@ -151,6 +151,33 @@ def keep_detections(
     return out[:MAX_DETECTIONS]
 
 
+_PRONOUN = re.compile(r"\b(it|them)\b", re.IGNORECASE)  # "make it green"
+
+
+def object_prompt(prompt: str, query: str) -> str:
+    """The instruction Kontext gets when the user named the object to change.
+
+    Kontext cannot see the mask, so a bare "make it green" leaves it guessing what "it" is
+    (it painted chairs flat green, 2026-11-17). "it"/"them" become the named object, and
+    the instruction says what to keep (texture and shading; for a removal, what is behind
+    it). The result is still used as Kontext proposes it, inside the mask only.
+    """
+    nouns = [re.sub(r"^(the|a|an)\s+", "", p) for p in object_phrases(query)]
+    target = "the " + " and the ".join(nouns)
+    text = " ".join((prompt or "").split()).rstrip(" .")
+    text = _PRONOUN.sub(target, text)
+    if not any(n in text.lower() for n in nouns):
+        text = f"{text} ({target})" if text else f"Change {target}"
+    if is_removal(prompt):
+        tail = (f"Fill the space where {target} stood with the floor, wall and objects "
+                "that are behind them, matching the lighting. Keep everything else "
+                "unchanged.")  # fmt: skip
+    else:
+        tail = (f"Keep the shape, material, texture, shading and lighting of {target}. "
+                "Keep everything else unchanged.")  # fmt: skip
+    return f"{text}. {tail}"
+
+
 def mask_info(
     query: str,
     detections: list[Detection],
