@@ -741,6 +741,39 @@ window.addEventListener("message", (e) => {
                               tiltX: d.tiltX, tiltY: d.tiltY, t: Date.now()});
   box.dispatchEvent(new Event("input", {bubbles: true}));
 });
+// Futures gallery: a trash button on every tile but the first (the plain render). A click
+// asks first, then sends "<tile index>:<time>" to the hidden #futures-delete-bridge.
+(() => {
+  const mark = (gallery) => {
+    gallery.querySelectorAll(".gallery-item").forEach((item, i) => {
+      if (i === 0 || item.querySelector(".future-trash")) return;
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "future-trash";
+      b.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff"'
+        + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>';
+      b.title = "Delete this future"; b.setAttribute("aria-label", "Delete this future");
+      b.addEventListener("click", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const items = [...gallery.querySelectorAll(".gallery-item")];
+        const idx = items.indexOf(item);
+        const label = item.querySelector(".caption-label");
+        const cap = label ? label.textContent.trim() : "this future";
+        if (idx < 1 || !confirm(`Delete the future "${cap}"? This cannot be undone.`)) return;
+        const box = document.querySelector(
+          "#futures-delete-bridge textarea, #futures-delete-bridge input");
+        if (!box) return;
+        box.value = idx + ":" + Date.now();
+        box.dispatchEvent(new Event("input", {bubbles: true}));
+      });
+      item.appendChild(b);
+    });
+  };
+  new MutationObserver(() => {
+    const g = document.getElementById("futures-gallery");
+    if (g) mark(g);
+  }).observe(document.documentElement, {childList: true, subtree: true});
+})();
 </script>"""
 
 
@@ -1103,6 +1136,13 @@ SET_CAMERA_JS = """(text) => {
     f.contentWindow.postMessage({type: "hide_image"}, "*");
     f.contentWindow.postMessage({type: "set_camera", ...JSON.parse(text)}, "*");
   } catch (err) { console.warn("set_camera", err); }
+}"""
+
+# After a delete: remove the overlay if it showed the deleted future ({"hide": true}).
+HIDE_FUTURE_JS = """(text) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  if (!text || !f || !f.contentWindow || !text.includes('"hide"')) return;
+  f.contentWindow.postMessage({type: "hide_image"}, "*");
 }"""
 
 # A gallery tile in the viewer: move to its view, then lay the future over it (`src`),
@@ -1737,6 +1777,53 @@ def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
             changed]  # fmt: skip
 
 
+_DELETE_LOCK = threading.Lock()
+_DELETE_SEEN: set[str] = set()  # delete requests ("<index>:<time>") already handled
+
+
+def on_delete_future(text, last, scene_id, vp_id, keys, picked, shown, parent):
+    """Trash button on a gallery tile ("<index>:<time>" from the page): delete that future.
+    `last` is the request handled before; the same request again does nothing.
+
+    Outputs: gallery, tile keys, picked, compare note, result, result details, "Start from
+    this", shown tile, viewer message, parent, parent note, parent group, last request.
+    """
+    try:
+        i = int(str(text).split(":", 1)[0])
+    except ValueError:
+        return [gr.skip()] * 13
+    with _DELETE_LOCK:  # also catches a duplicate sent before `last` reached the page
+        if text == last or text in _DELETE_SEEN:
+            return [gr.skip()] * 13
+        _DELETE_SEEN.add(text)
+    if not keys or not 0 < i < len(keys):
+        raise gr.Error("This future is no longer in the gallery; pick the view again.")
+    job_id = keys[i]
+    try:
+        job = futures.delete_future(FUTURES, job_id)
+    except futures.FutureError as e:
+        raise gr.Error(str(e)) from e
+    PREVIEWS.images.pop(job_id, None)
+    for path in (_local("futures", f"{job_id}.jpg"), _local("thumbs", "futures", f"{job_id}.jpg"),
+                 _local("thumbs", "viewer", f"{job_id}.jpg")):  # fmt: skip
+        path.unlink(missing_ok=True)
+    gr.Info(f'Deleted the future "{futures.caption(job)}".')
+    items, keys, label = _gallery(scene_id, vp_id)
+    picked = [k for k in (picked or []) if k != job_id]
+    names = ["plain render" if k == "render" else f"`{k}`" for k in picked]
+    note = "Picked to compare: " + " and ".join(names) if picked else ""
+    out = [gr.update(value=items, label=label), keys, picked, note]
+    if shown == job_id:
+        out += [None, "", gr.update(interactive=False), None, json.dumps({"hide": True})]
+    else:
+        out += [gr.skip()] * 4 + [""]
+    if parent == job_id:
+        out += [None, "", gr.update(visible=False)]
+    else:
+        out += [gr.skip()] * 3
+    return [*out, text]
+
+
 def on_start_from(shown: str | None):
     """ "Start from this": the next Make restyles the shown future's image.
 
@@ -1959,7 +2046,13 @@ button { transition: transform 60ms ease, filter 60ms ease; }
 button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); }
 button:disabled { cursor: progress !important; }
 #placement-bridge, #camera-bridge, #futures-camera-bridge,
-#futures-overlay-bridge { display: none !important; }
+#futures-overlay-bridge, #futures-delete-bridge { display: none !important; }
+#futures-gallery .gallery-item { position: relative; }
+#futures-gallery .future-trash { position: absolute; top: 8px; right: 8px; z-index: 5;
+  width: 30px; height: 30px; padding: 0; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; background: rgba(20,24,32,.85);
+  border: 1px solid #6b7385; cursor: pointer; }
+#futures-gallery .future-trash:hover { opacity: 1; background: #b42318; }
 #history-table td, #history-table th { font-size: 13px; }
 #history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr,
 #previews-table tbody tr { cursor: pointer; }
@@ -2300,6 +2393,11 @@ def build() -> gr.Blocks:
                                     elem_id="futures-overlay-bridge", show_label=False,
                                     container=False,
                                 )  # fmt: skip
+                                fu_deleted = gr.State(None)
+                                fu_delete = gr.Textbox(
+                                    elem_id="futures-delete-bridge", show_label=False,
+                                    container=False,
+                                )  # fmt: skip
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
@@ -2562,6 +2660,14 @@ def build() -> gr.Blocks:
             [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note, fu_overlay,
              fu_changed],
         ).then(None, fu_overlay, None, js=SHOW_FUTURE_JS)  # fmt: skip
+        # `input` only (a programmatic value change must not delete); `fu_deleted` keeps
+        # the last request, so an event that arrives twice deletes one future, not two.
+        fu_delete.input(
+            on_delete_future,
+            [fu_delete, fu_deleted, picker, fu_vp, fu_keys, fu_picked, fu_shown, fu_parent],
+            [fu_gallery, fu_keys, fu_picked, fu_pick_note, fu_result, fu_details, fu_from,
+             fu_shown, fu_overlay, fu_parent, fu_parent_note, fu_parent_group, fu_deleted],
+        ).then(None, fu_overlay, None, js=HIDE_FUTURE_JS)  # fmt: skip
         fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
         fu_parent_clear.click(
             lambda: (None, "", gr.update(visible=False)), None,

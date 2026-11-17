@@ -62,6 +62,10 @@ The system SHALL show all futures of one viewpoint in a gallery, with the plain 
 - **WHEN** the user clicks a future in the gallery
 - **THEN** the 3D viewer moves to the future's viewpoint and shows the future over the scene, with a slider that fades between the future and the 3D view and a "Back to 3D" button; clicking the plain render, or another viewpoint, removes the overlay
 
+#### Scenario: Delete a future
+- **WHEN** the user clicks the trash button on a future's gallery tile and confirms
+- **THEN** that future's folder is removed from the dataset and its tile disappears; the plain render has no trash button, a future still being made cannot be deleted, and futures built on it keep their own image
+
 #### Scenario: Futures from earlier sessions
 - **WHEN** the scene has futures made on an earlier day
 - **THEN** they are listed in the same gallery with their dates

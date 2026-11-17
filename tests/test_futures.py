@@ -190,3 +190,21 @@ def test_object_to_change_goes_to_kontext_and_shows_in_details(tmp_path: Path) -
         futures.future_params(vp, prefix, None, "x", None, "sdxl-depth", object_query="chairs")
     with pytest.raises(futures.FutureError, match="limit"):
         futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query="x" * 61)
+
+
+def test_delete_future_removes_its_folder(tmp_path: Path) -> None:
+    from dataclasses import asdict
+
+    store = LocalStore(tmp_path)
+    mgr = JobManager(store, FakeClient(), prefix="previews")
+    for job in (_future("a", "v", 1.0), _future("b", "v", 2.0, status="running")):
+        store.write_json(f"previews/{job.job_id}/job.json", asdict(job))
+    plain = Job("p", "preview", "p", 3.0, status="done")
+    store.write_json("previews/p/job.json", asdict(plain))
+    index = futures.FutureIndex(mgr)
+    index.jobs()
+    assert futures.delete_future(index, "a").job_id == "a"
+    assert store.list_dirs("previews") == ["b", "p"] and "a" not in index.final
+    for job_id, why in (("b", "still being made"), ("p", "not found"), ("a", "not found")):
+        with pytest.raises(futures.FutureError, match=why):
+            futures.delete_future(index, job_id)
