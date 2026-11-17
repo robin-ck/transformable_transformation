@@ -58,6 +58,10 @@ The system SHALL show all futures of one viewpoint in a gallery, with the plain 
 - **WHEN** the user selects two futures in the gallery and chooses Compare
 - **THEN** both images are shown next to each other at the same size, each with its full prompt, starter and date
 
+#### Scenario: Future in the viewer
+- **WHEN** the user clicks a future in the gallery
+- **THEN** the 3D viewer moves to the future's viewpoint and shows the future over the scene, with a slider that fades between the future and the 3D view and a "Back to 3D" button; clicking the plain render, or another viewpoint, removes the overlay
+
 #### Scenario: Futures from earlier sessions
 - **WHEN** the scene has futures made on an earlier day
 - **THEN** they are listed in the same gallery with their dates

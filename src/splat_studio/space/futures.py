@@ -22,6 +22,7 @@ from .viewpoints import Starter, Viewpoint
 
 MAX_PROMPT = 300  # SDXL reads at most 77 tokens; the starter comes first, so it is kept
 THUMB_SIDE = 512
+VIEWER_SIDE = 1280  # image laid over the 3D viewer (sent inline as a data URL)
 
 
 class FutureError(ValueError):
@@ -148,3 +149,10 @@ def thumbnail(src: Path, dest: Path, side: int = THUMB_SIDE) -> Path:
         img.thumbnail((side, side))
         img.save(dest, format="JPEG", quality=85)
     return dest
+
+
+def data_url(path: Path) -> str:
+    """A JPEG file as a `data:` URL, for the viewer overlay (no file route needed)."""
+    import base64
+
+    return "data:image/jpeg;base64," + base64.b64encode(Path(path).read_bytes()).decode()

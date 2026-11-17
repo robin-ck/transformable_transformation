@@ -1094,12 +1094,28 @@ GET_CAMERA_JS = """async (...args) => {
 }"""
 
 
-# Moves the viewer to a saved view (`viewer.py`, "set_camera"); the input is JSON.
+# Moves the viewer to a saved view (`viewer.py`, "set_camera"); the input is JSON. A
+# future laid over the viewer is removed, since it belongs to the view before.
 SET_CAMERA_JS = """(text) => {
   const f = document.querySelector("iframe.splat-viewer");
   if (!text || !f || !f.contentWindow) return;
-  try { f.contentWindow.postMessage({type: "set_camera", ...JSON.parse(text)}, "*"); }
-  catch (err) { console.warn("set_camera", err); }
+  try {
+    f.contentWindow.postMessage({type: "hide_image"}, "*");
+    f.contentWindow.postMessage({type: "set_camera", ...JSON.parse(text)}, "*");
+  } catch (err) { console.warn("set_camera", err); }
+}"""
+
+# A gallery tile in the viewer: move to its view, then lay the future over it (`src`),
+# or remove the overlay for the plain render. The input is JSON (`_viewer_overlay`).
+SHOW_FUTURE_JS = """(text) => {
+  const f = document.querySelector("iframe.splat-viewer");
+  if (!text || !f || !f.contentWindow) return;
+  try {
+    const d = JSON.parse(text), w = f.contentWindow;
+    w.postMessage({type: "set_camera", position: d.position, target: d.target}, "*");
+    w.postMessage(d.src ? {type: "show_image", src: d.src, caption: d.caption}
+                        : {type: "hide_image"}, "*");
+  } catch (err) { console.warn("show_future", err); }
 }"""
 
 
@@ -1217,7 +1233,8 @@ _last_warm = [0.0]
 FUTURE_HINT = (
     "Futures are restyled images made from saved views. Move the viewer to a spot you "
     "want to change and click **Save current view**, or just type a prompt and click "
-    "**Make future**: the current view is then saved first."
+    "**Make future**: the current view is then saved first. Click a future in the gallery "
+    "to see it in the viewer, laid over the 3D scene at its view."
 )
 
 
@@ -1640,23 +1657,41 @@ def _tile_image(scene_id: str, vp_id: str, key: str) -> tuple[Path | None, str]:
     return _future_image(job), futures.details_markdown(job, vp.name if vp else None)
 
 
-def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
-    """A click on a gallery tile: show it large, and keep it as one of the two to compare.
+def _viewer_overlay(scene_id: str, vp_id: str, key: str, image: Path | None) -> str:
+    """Message for SHOW_FUTURE_JS: move the viewer to the view and lay the future over it
+    (no image for the plain render, which is the 3D view itself)."""
+    vp = _setup(scene_id).get(vp_id) if scene_id and vp_id else None
+    if vp is None:
+        return ""
+    msg = _viewer_camera(vp)
+    job = _future_job(key) if key != "render" else None
+    if job is not None and image is not None:
+        dest = _local("thumbs", "viewer", f"{job.job_id}.jpg")
+        msg["src"] = futures.data_url(futures.thumbnail(image, dest, futures.VIEWER_SIDE))
+        msg["caption"] = f"{vp.name}: {futures.caption(job, 60)}"
+    return json.dumps(msg)
 
-    Outputs: result, result details, "Start from this", shown tile, picked, compare note.
+
+def on_pick_tile(scene_id, vp_id, keys, picked, evt: gr.SelectData):
+    """A click on a gallery tile: show it large and in the viewer, and keep it as one of
+    the two to compare.
+
+    Outputs: result, result details, "Start from this", shown tile, picked, compare note,
+    viewer message.
     """
     i = evt.index if isinstance(evt.index, int) else evt.index[0]
     if not keys or not 0 <= i < len(keys):
-        return [gr.skip()] * 6
+        return [gr.skip()] * 7
     key = keys[i]
     image, details = _tile_image(scene_id, vp_id, key)
+    overlay = _viewer_overlay(scene_id, vp_id, key, image)
     picked = [k for k in (picked or []) if k != key][-1:] + [key]
     names = ["plain render" if k == "render" else f"`{k}`" for k in picked]
     note = "Picked to compare: " + " and ".join(names)
     if len(picked) < 2:
         note += " (pick one more)"
     return [str(image) if image else None, details,
-            gr.update(interactive=key != "render"), key, picked, note]  # fmt: skip
+            gr.update(interactive=key != "render"), key, picked, note, overlay]  # fmt: skip
 
 
 def on_start_from(shown: str | None):
@@ -1879,7 +1914,8 @@ CSS = """
 button { transition: transform 60ms ease, filter 60ms ease; }
 button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); }
 button:disabled { cursor: progress !important; }
-#placement-bridge, #camera-bridge, #futures-camera-bridge { display: none !important; }
+#placement-bridge, #camera-bridge, #futures-camera-bridge,
+#futures-overlay-bridge { display: none !important; }
 #history-table td, #history-table th { font-size: 13px; }
 #history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr,
 #previews-table tbody tr { cursor: pointer; }
@@ -2197,6 +2233,10 @@ def build() -> gr.Blocks:
                                     elem_id="futures-camera-bridge", show_label=False,
                                     container=False,
                                 )  # fmt: skip
+                                fu_overlay = gr.Textbox(
+                                    elem_id="futures-overlay-bridge", show_label=False,
+                                    container=False,
+                                )  # fmt: skip
                 # Hidden helpers for the iframe messages (kept in the DOM, hidden by CSS).
                 bridge = gr.Textbox(elem_id="placement-bridge", show_label=False, container=False)
                 camera_json = gr.Textbox(elem_id="camera-bridge", show_label=False, container=False)
@@ -2455,8 +2495,8 @@ def build() -> gr.Blocks:
         fu_job.change(*log)
         fu_gallery.select(
             on_pick_tile, [picker, fu_vp, fu_keys, fu_picked],
-            [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note],
-        )  # fmt: skip
+            [fu_result, fu_details, fu_from, fu_shown, fu_picked, fu_pick_note, fu_overlay],
+        ).then(None, fu_overlay, None, js=SHOW_FUTURE_JS)  # fmt: skip
         fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
         fu_parent_clear.click(
             lambda: (None, "", gr.update(visible=False)), None,

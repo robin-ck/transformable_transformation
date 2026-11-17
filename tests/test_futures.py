@@ -140,3 +140,16 @@ def test_caption_details_and_thumbnail(tmp_path: Path) -> None:
     with Image.open(thumb) as img:
         assert img.size == (512, 384) and img.format == "JPEG"
     assert futures.thumbnail(tmp_path / "missing.png", thumb) == thumb  # cached
+
+
+def test_data_url_for_the_viewer_overlay(tmp_path: Path) -> None:
+    import base64
+
+    src = tmp_path / "big.png"
+    Image.new("RGB", (2000, 1000), "green").save(src)
+    jpg = futures.thumbnail(src, tmp_path / "v.jpg", futures.VIEWER_SIDE)
+    url = futures.data_url(jpg)
+    assert url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == jpg.read_bytes()
+    with Image.open(jpg) as img:
+        assert img.size == (1280, 640)
