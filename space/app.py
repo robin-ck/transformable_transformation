@@ -2708,7 +2708,11 @@ def build() -> gr.Blocks:
             [fu_delete, fu_deleted, picker, fu_vp, fu_keys, fu_picked, fu_shown, fu_parent],
             [fu_gallery, fu_keys, fu_picked, fu_pick_note, fu_result, fu_details, fu_from,
              fu_shown, fu_overlay, fu_parent, fu_parent_note, fu_parent_group, fu_deleted],
-        ).then(None, fu_overlay, None, js=HIDE_FUTURE_JS)  # fmt: skip
+        ).then(None, fu_overlay, None, js=HIDE_FUTURE_JS).then(
+            # The shown future was deleted (no tile shown): hide its two small images too.
+            lambda shown: [gr.skip()] * 2 if shown else [gr.update(value=None, visible=False)] * 2,
+            fu_shown, [fu_changed, fu_detected],
+        )  # fmt: skip
         fu_from.click(on_start_from, fu_shown, [fu_parent, fu_parent_note, fu_parent_group])
         fu_parent_clear.click(
             lambda: (None, "", gr.update(visible=False)), None,
