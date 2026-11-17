@@ -30,7 +30,8 @@
   - Checked with stubs in `tests/test_preview_worker.py` (cold container reads the view from the dataset; missing parent fails cleanly). Not run on a GPU (6.2).
 - [ ] 3.3 Space: starters, prompt, Make, status and result in the Futures sub-tab; Make from an unsaved current view saves it as a viewpoint; 1 s poll for the running future; shows the returned image before writing `job.json`; warm-up when the sub-tab opens
 - [ ] 3.4 "Start from this" on a future: parent's `preview.png` as input, parent recorded
-- [ ] 3.5 Prompt log lists futures as previews with the viewpoint name; test in `tests/test_prompt_log.py`
+- [x] 3.5 Prompt log lists futures as previews with the viewpoint name; test in `tests/test_prompt_log.py`
+  - Result column: `preview of v2 · view "bridge" (job …)`; a removed viewpoint shows as "removed view". The Space passes the scene's viewpoint names. 228 passed. (Done before the UI tasks, as it is pure logic.)
 
 ## 4. Comparison
 - [ ] 4.1 Gallery: plain render first, then futures newest first with the start of their prompt; 512 px thumbnails cached locally
@@ -42,4 +43,5 @@
 ## 6. Check
 - [ ] 6.1 ruff + pytest pass
 - [ ] 6.2 Deploy Modal; on a river scene, save 4 viewpoints and 4 starters, make futures from them and from an unsaved view, build on one, compare two; check `run.json` stage times and the click-to-image time (target ≤ 20 s warm, ≤ 90 s cold)
-- [ ] 6.3 README: how to save viewpoints, set starters, make and compare futures
+- [x] 6.3 README: how to save viewpoints, set starters, make and compare futures
+  - "Futures" bullet under Using the Space; scene deletion now names futures and saved views.
