@@ -58,7 +58,8 @@ GPU, CPU_CORES = "A10G", 4.0  # keep in sync with TRAIN_GPU, CPU_CORES in modal_
 #   20261115-184011-7e524c  frames  9 s, poses 317 s, training 237 s, 0.54 M Gaussians
 #   20261115-213245-7a7de6  frames 13 s, poses 248 s, training 359 s, 2.38 M Gaussians
 # Training time follows the number of Gaussians the scene grows, so it depends on the scene.
-FRAMES_S = 15.0  # a 2 min video takes about 18 s
+# sharpest-frames takes 3x the candidates; locally a 2 min 1080p video went from 3.4 to 5.1 s.
+FRAMES_S = 25.0  # was 15 s (a 2 min video took about 18 s)
 POSES_S, POSES_FRAMES = 503.0, 180
 # COLMAP's mapper grows faster than linearly with the number of images; the power is a
 # guess. Photo sets use exhaustive matching (every pair), so they may take longer.
