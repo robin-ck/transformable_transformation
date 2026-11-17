@@ -1559,9 +1559,9 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
     """Poll the running future and a new viewpoint's render (every second).
 
     Outputs: status, running future, pending view render, result, result details,
-    "Start from this", gallery, tile keys, strip, timer.
+    "Start from this", gallery, tile keys, strip, timer, shown tile.
     """
-    out = [gr.skip()] * 10
+    out = [gr.skip()] * 11
     view_pending, running = bool(pending), bool(job_id)
     if pending:
         try:
@@ -1615,6 +1615,7 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
                 out[3] = str(image) if image else None
                 out[4] = futures.details_markdown(job, vp.name if vp else None)
                 out[5] = gr.update(interactive=True)
+                out[10] = job.job_id  # "Start from this" builds on the image just shown
                 if scene_id and vp:
                     items, keys, label = _gallery(scene_id, vp.id)
                     out[6], out[7] = gr.update(value=items, label=label), keys
@@ -2163,12 +2164,12 @@ def build() -> gr.Blocks:
                                     fu_pick_note = gr.Markdown()
                                     fu_compare = gr.Button("Compare", scale=0, min_width=120)
                                 with gr.Row(visible=False, equal_height=False) as fu_cmp:
-                                    with gr.Column():
+                                    with gr.Column(min_width=120):
                                         fu_cmp_a = gr.Image(
                                             interactive=False, height=300, show_label=False
                                         )
                                         fu_cmp_a_md = gr.Markdown()
-                                    with gr.Column():
+                                    with gr.Column(min_width=120):
                                         fu_cmp_b = gr.Image(
                                             interactive=False, height=300, show_label=False
                                         )
@@ -2447,7 +2448,7 @@ def build() -> gr.Blocks:
         fu_timer.tick(
             on_futures_tick, [fu_job, fu_pending, picker, fu_vp],
             [fu_status, fu_job, fu_pending, fu_result, fu_details, fu_from, fu_gallery,
-             fu_keys, fu_strip, fu_timer],
+             fu_keys, fu_strip, fu_timer, fu_shown],
             concurrency_limit=1, show_progress="hidden",
         )  # fmt: skip
         # A started or finished future adds a line to the prompt log.
