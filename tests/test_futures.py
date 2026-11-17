@@ -208,3 +208,26 @@ def test_delete_future_removes_its_folder(tmp_path: Path) -> None:
     for job_id, why in (("b", "still being made"), ("p", "not found"), ("a", "not found")):
         with pytest.raises(futures.FutureError, match=why):
             futures.delete_future(index, job_id)
+
+
+def test_detections_are_kept_listed_and_captioned(tmp_path: Path) -> None:
+    store, client = LocalStore(tmp_path), FakeClient()
+    mgr = JobManager(store, client, lambda: 10.0, prefix="previews")
+    _, vp = _setup()
+    prefix = viewpoints.view_prefix("s1", vp.id)
+    params = futures.future_params(vp, prefix, None, "paint the chairs", None, "flux-kontext",
+                                   object_query="chairs, stool")  # fmt: skip
+    job = mgr.create_preview("paint the chairs", "scenes/s1/v2", CAM, future=params)
+    mask = {"detections": 3, "labels": ["chair", "stool", "chair"], "scores": [0.62, 0.5, 0.41]}
+    client.results[job.call_id] = {"status": "done", "scene_path": "previews/x",
+                                   "image_jpeg": b"jpg", "detections_jpeg": b"det",
+                                   "mask": mask}  # fmt: skip
+    job = mgr.refresh(job)
+    assert mgr.detections[job.job_id] == b"det" and "detections_jpeg" not in job.run
+    assert futures.detections_caption(job) == "Detected: 2 × chair, 1 × stool"
+    details = futures.details_markdown(job)
+    assert "**Detected:** 1 chair 0.62 · 2 stool 0.50 · 3 chair 0.41" in details
+    plain = futures.future_params(vp, prefix, None, "x", None, "flux-kontext")
+    other = mgr.create_preview("x", "scenes/s1/v2", CAM, future=plain)
+    assert futures.detections_caption(other) is None
+    assert "Detected" not in futures.details_markdown(other)

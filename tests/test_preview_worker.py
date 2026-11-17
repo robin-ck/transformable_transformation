@@ -188,9 +188,9 @@ class FakeMasker:
         import numpy as np
 
         self.calls.append(("segment", len(detections)))
-        hard = np.zeros(image.size[::-1], bool)
-        hard[20:40, 10:30] = True
-        return hard
+        masks = np.zeros((len(detections), *image.size[::-1]), bool)
+        masks[0, 20:40, 10:30] = True
+        return masks
 
 
 class RedEditor:
@@ -219,15 +219,18 @@ def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
     res = render(w, "m1", "scenes/s/v1", CAM, "make the chairs red", view_prefix="viewpoints/s/a",
                  object_query="  chairs ")  # fmt: skip
     assert res["status"] == "done", res
-    assert COMMITS[-1] == ["previews/m1/mask.png", "previews/m1/preview.png",
-                           "previews/m1/run.json"]  # fmt: skip
+    assert COMMITS[-1] == ["previews/m1/detections.jpg", "previews/m1/mask.png",
+                           "previews/m1/preview.png", "previews/m1/run.json"]  # fmt: skip
+    assert res["detections_jpeg"][:2] == b"\xff\xd8"
+    labelled = Image.open(io.BytesIO(REPO["previews/m1/detections.jpg"]))
+    assert labelled.format == "JPEG" and labelled.size == (64, 64)
     out = np.asarray(Image.open(io.BytesIO(REPO["previews/m1/preview.png"])))
     mask = np.asarray(Image.open(io.BytesIO(REPO["previews/m1/mask.png"])))
     assert res["mask_png"] == REPO["previews/m1/mask.png"]
     assert (out[mask == 0] == [0, 128, 0]).all()  # PIL "green" is (0, 128, 0)
     assert (out[30, 20] == [255, 0, 0]).all() and (out[0, 0] == [0, 128, 0]).all()
     run = json.loads(REPO["previews/m1/run.json"])
-    assert {"detect", "segment", "restyle", "composite"} <= set(run["stages"])
+    assert {"detect", "segment", "annotate", "restyle", "composite"} <= set(run["stages"])
     assert run["object_query"] == "chairs" and run["prompt"] == "make the chairs red"
     assert run["editor_prompt"].startswith("make the chairs red. Keep the shape")
     assert run["mask"]["detections"] == 1 and run["mask"]["boxes"] == [[10, 20, 30, 40]]
@@ -245,6 +248,7 @@ def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
     # 3. No query: no mask, Kontext's image as it is.
     res = render(w, "m3", "scenes/s/v1", CAM, "make it red", view_prefix="viewpoints/s/a")
     assert res["status"] == "done" and "mask_png" not in res and res["mask"] is None
+    assert "detections_jpeg" not in res
     assert COMMITS[-1] == ["previews/m3/preview.png", "previews/m3/run.json"]
 
     # 4. An editor without a masker refuses the query.

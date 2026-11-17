@@ -254,8 +254,8 @@ class ObjectMasker:
                                image.size)  # fmt: skip
 
     def segment(self, image: Any, detections: list[Detection]) -> np.ndarray:
-        """One boolean mask (height, width) covering every detection: per box, the best
-        of SAM's three masks (highest predicted IoU)."""
+        """One boolean mask per detection, (detections, height, width): per box, the best
+        of SAM's three masks (highest predicted IoU). `.any(0)` joins them."""
         import torch
 
         if self.sam is None:
@@ -271,4 +271,4 @@ class ObjectMasker:
         )  # (boxes, 3, height, width) bool
         best = outputs.iou_scores[0].argmax(-1).cpu()  # (boxes,)
         chosen = masks[torch.arange(len(detections)), best]
-        return chosen.any(0).numpy()
+        return chosen.numpy()
