@@ -77,10 +77,22 @@ def submit_edit(
 
 
 def submit_preview(
-    job_id: str, scene_path: str, camera: dict, prompt: str, seed: int = 0, strength: float = 0.7
+    job_id: str,
+    scene_path: str,
+    camera: dict,
+    prompt: str,
+    seed: int = 0,
+    strength: float = 0.7,
+    view_prefix: str | None = None,
+    input_path: str | None = None,
+    class_name: str = "PreviewRenderer",
 ) -> str:
+    """A preview, or a future when `view_prefix` names a viewpoint (add-viewpoint-futures);
+    `input_path` (a parent future's preview.png) is restyled instead of the render.
+    `class_name` is the editor's Modal class (`models.EditorSpec.modal_class`)."""
+    kwargs = {k: v for k, v in (("view_prefix", view_prefix), ("input_path", input_path)) if v}
     return spawn_method(
-        "PreviewRenderer",
+        class_name,
         "render",
         job_id,
         scene_path,
@@ -88,7 +100,20 @@ def submit_preview(
         prompt,
         seed=seed,
         strength=strength,
+        **kwargs,
     )
+
+
+def submit_view(
+    scene_path: str, camera: dict, out_prefix: str, class_name: str = "PreviewRenderer"
+) -> str:
+    """Render a new viewpoint once and store it under `out_prefix`; returns the call id."""
+    return spawn_method(class_name, "render_view", scene_path, camera, out_prefix)
+
+
+def warm_preview(class_name: str = "PreviewRenderer") -> str:
+    """Start a preview container ahead of a future, so its models are loaded in time."""
+    return spawn_method(class_name, "warm")
 
 
 def submit_image(

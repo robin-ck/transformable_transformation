@@ -76,3 +76,21 @@ def test_lineage_skips_unrelated_branches_and_survives_cycles() -> None:
     assert [v.number for v in prompt_log.lineage(looped, 2)] == [1, 2]
     assert prompt_log.history_markdown(vs, None) == ""
     assert prompt_log.history_markdown(vs, 9) == ""
+
+
+def test_futures_are_logged_as_previews_with_their_viewpoint_name() -> None:
+    future = _preview("f1", "scenes/s1/v2", 6 * DAY)
+    future.params.update(viewpoint="vp1", prompt="nature first text, willows")
+    gone = _preview("f2", "scenes/s1/v2", 7 * DAY)
+    gone.params["viewpoint"] = "vp9"  # a removed viewpoint
+    rows = [
+        e.row()
+        for e in prompt_log.scene_log("s1", _versions(), [future, gone], [], {"vp1": "bridge"})
+    ]
+    assert rows[0][4] == 'preview of v2 · view "removed view" (job f2)'
+    assert rows[1][1:5] == [
+        "preview (2D)",
+        "nature first text, willows",
+        "sdxl+depth",
+        'preview of v2 · view "bridge" (job f1)',
+    ]

@@ -8,6 +8,7 @@ Deleting a scene removes, in one store commit, the scene and every job made for 
   edits/<job>/     (params.scene_id == id)          its edits
   previews/<job>/  (params.scene_path in scenes/<id>/)  its previews
   objects/<job>/   (params.scene_id == id)          objects generated for it
+  viewpoints/<id>/                                  its viewpoints and starters (if any)
 Image jobs belong to no scene and are kept. Deletion is refused while one of these
 jobs is still queued or running (its worker would write into a deleted folder).
 On HF Hub the files stay in the dataset's git history.
@@ -99,11 +100,14 @@ def delete_plan(
     objects: list[Job],
     previews: list[Job],
     edits: list[Job],
+    viewpoints: bool = False,
 ) -> DeletePlan:
     """Folders to delete for `scene_id` and the jobs among them that are not finished.
 
     Pass the jobs of each kind as listed (unfinished ones refreshed first, so a job that
-    finished while no page watched it does not block deletion).
+    finished while no page watched it does not block deletion). `viewpoints`: whether the
+    scene has a `viewpoints/<id>/` folder (the Hub refuses to delete a missing folder).
+    Futures are previews of the scene, so they are already among `previews`.
     """
     mine = {
         "edits": [j for j in edits if j.params.get("scene_id") == scene_id],
@@ -112,6 +116,8 @@ def delete_plan(
     }
     folders = [f"jobs/{scene_id}", f"scenes/{scene_id}"]
     folders += [f"{kind}/{j.job_id}" for kind, jobs in mine.items() for j in jobs]
+    if viewpoints:
+        folders.append(f"viewpoints/{scene_id}")
     counts = {"versions": n_versions, **{k: len(v) for k, v in mine.items()}}
     running = [j for jobs in mine.values() for j in jobs if j.status not in FINAL]
     return DeletePlan(scene_id, folders, counts, running)

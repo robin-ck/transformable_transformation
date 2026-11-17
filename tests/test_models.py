@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from splat_studio import models
 
 
@@ -20,3 +22,33 @@ def test_label_is_short_and_traceable():
 def test_repo_ids_unique():
     ids = [spec.repo_id for spec in models.ALL]
     assert len(ids) == len(set(ids))
+
+
+def test_editor_registry_has_default_with_allowed_licences():
+    spec = models.editor_spec(None)
+    assert spec.key == models.DEFAULT_EDITOR == "sdxl-depth"
+    assert models.editor_spec("sdxl-depth") is spec
+    assert spec.licence == "openrail++"
+    for editor in models.EDITORS.values():
+        assert editor.licence
+        assert all(m.licence in models.ALLOWED_LICENCES for m in editor.models), editor.key
+
+
+def test_editor_label_matches_what_previews_stored():
+    label = f"{models.PREVIEW_BASE.label} + {models.PREVIEW_DEPTH.label}"
+    assert models.editor_spec("sdxl-depth").label == label
+
+
+def test_unknown_editor_is_refused():
+    with pytest.raises(KeyError, match="sdxl-depth"):
+        models.editor_spec("flux-kontext")
+
+
+def test_make_editor_builds_without_loading_models():
+    from splat_studio.editing import restyle
+
+    editor = restyle.make_editor()
+    assert (editor.key, editor.uses_depth, editor.pipe) == ("sdxl-depth", True, None)
+    assert editor.label == models.editor_spec(None).label
+    with pytest.raises(KeyError):
+        restyle.make_editor("nope")
