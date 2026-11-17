@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.6", "pytest>=8"]
+dev = ["ruff>=0.6", "pytest>=8", "huggingface_hub>=0.24", "Pillow>=10"]
 modal = ["modal>=1.0"]
 
 [tool.setuptools.packages.find]
