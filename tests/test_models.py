@@ -109,5 +109,6 @@ def test_sdpa_shim_drops_false_gqa_and_refuses_true():
 
 
 def test_every_editor_sets_its_steps():
-    assert models.editor_spec("sdxl-depth").steps == 30  # unchanged for old previews
-    assert models.editor_spec("flux-kontext").steps == 20
+    assert models.editor_spec("sdxl-depth").steps == 30  # Preview tool keeps 30
+    for spec in models.EDITORS.values():
+        assert 0 < spec.fast_steps < spec.steps, spec.key

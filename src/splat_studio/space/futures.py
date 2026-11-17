@@ -44,6 +44,19 @@ def compose_prompt(starter: Starter | None, own: str | None) -> str:
     return prompt
 
 
+SPEEDS = ("fast", "quality")  # the Speed choice next to Make future
+DEFAULT_SPEED = "fast"
+
+
+def steps_for(editor: str | None, speed: str | None) -> int:
+    """Denoising steps of `editor` for a speed ("fast" or "quality"; None: the default)."""
+    spec = models.editor_spec(editor)
+    speed = speed or DEFAULT_SPEED
+    if speed not in SPEEDS:
+        raise FutureError(f"Unknown speed {speed!r}; pick one of {', '.join(SPEEDS)}.")
+    return spec.fast_steps if speed == "fast" else spec.steps
+
+
 def future_params(
     vp: Viewpoint,
     view_prefix: str,
@@ -51,6 +64,7 @@ def future_params(
     own: str | None,
     parent: Job | None = None,
     editor: str | None = None,
+    speed: str | None = None,
 ) -> dict:
     """The future-specific fields of the preview job's `params` (see the module doc)."""
     spec = models.editor_spec(editor)
@@ -66,6 +80,8 @@ def future_params(
         "parent": parent.job_id if parent else None,
         "editor": spec.key,
         "model": spec.label,
+        "speed": speed or DEFAULT_SPEED,
+        "steps": steps_for(spec.key, speed),
     }
 
 
@@ -132,7 +148,8 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
     if p.get("parent"):
         lines.append(f"**Built on:** future `{p['parent']}`")
     model = job.run.get("model") or p.get("model")
-    lines.append(f"**Editor:** {model} · seed {p.get('seed', 0)} · job `{job.job_id}`")
+    steps = f" · {p['steps']} steps" if p.get("steps") else ""
+    lines.append(f"**Editor:** {model}{steps} · seed {p.get('seed', 0)} · job `{job.job_id}`")
     return "  \n".join(lines)
 
 

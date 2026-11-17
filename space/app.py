@@ -1518,7 +1518,9 @@ def on_manage_viewpoint(action: str, scene_id, vp_id, name):
             gr.update(value=items, label=label), keys]  # fmt: skip
 
 
-def on_make_future(camera_json, scene_id, starter_label, prompt, seed, vp_id, parent_id, number):
+def on_make_future(
+    camera_json, scene_id, starter_label, prompt, seed, speed, vp_id, parent_id, number
+):
     """Start a future. From the selected view while the viewer is at it (or from the
     parent future's view when building on one); otherwise the current view is saved as
     a new viewpoint first, in the same GPU job.
@@ -1546,8 +1548,9 @@ def on_make_future(camera_json, scene_id, starter_label, prompt, seed, vp_id, pa
     try:
         text = futures.compose_prompt(starter, prompt)
         params = futures.future_params(
-            vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor
-        )
+            vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor,
+            speed,
+        )  # fmt: skip
     except futures.FutureError as e:
         raise gr.Error(str(e)) from e
     job = PREVIEWS.create_preview(
@@ -2193,6 +2196,11 @@ def build() -> gr.Blocks:
                                     fu_parent_clear = gr.Button("Start fresh instead", size="sm")
                                 with gr.Row():
                                     fu_seed = gr.Number(label="Seed", value=0, precision=0)
+                                    fu_speed = gr.Radio(
+                                        [("Fast", "fast"), ("Quality", "quality")],
+                                        value=futures.DEFAULT_SPEED, label="Speed",
+                                        info="Fast: fewer steps, about a third quicker.",
+                                    )  # fmt: skip
                                     fu_make = gr.Button("Make future", variant="primary")
                                 fu_status = gr.Markdown()
                                 fu_result = gr.Image(
@@ -2493,7 +2501,8 @@ def build() -> gr.Blocks:
         clicked(
             fu_make, "⏳ Starting…", on_make_future,
             # States go last: GET_CAMERA_JS only replaces the first input.
-            [camera_json, picker, fu_starter, fu_prompt, fu_seed, fu_vp, fu_parent, version],
+            [camera_json, picker, fu_starter, fu_prompt, fu_seed, fu_speed, fu_vp, fu_parent,
+             version],
             [fu_status, fu_job, fu_vp, fu_parent, fu_parent_note, fu_strip, fu_vp_ids, fu_name,
              fu_gallery, fu_keys, fu_timer],
             js=GET_CAMERA_JS,
