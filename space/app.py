@@ -1229,7 +1229,7 @@ FUTURES = futures.FutureIndex(PREVIEWS)
 SETUPS: dict[str, viewpoints.Setup] = {}  # per scene; this Space is the only writer
 RUNNING: dict[str, Job] = {}  # futures this Space started, polled every second
 WARM_EVERY_S = 4 * 60  # a warm-up call keeps a container up for WARM_S (5 min) after it
-_last_warm = [0.0]
+_last_warm: dict[str, float] = {}  # Modal class -> last warm-up
 FUTURE_HINT = (
     "Futures are restyled images made from saved views. Move the viewer to a spot you "
     "want to change and click **Save current view**, or just type a prompt and click "
@@ -1350,16 +1350,22 @@ def _starter_choices(setup: viewpoints.Setup) -> list[str]:
     return ["none", *(s.label for s in setup.starters)]
 
 
-def _warm_up() -> None:
-    """Start a preview container in the background (at most every WARM_EVERY_S)."""
+def _editor_class(scene_id: str | None) -> str:
+    """Modal class of the scene's editor (the default editor without a scene)."""
+    key = _setup(scene_id).editor if scene_id else None
+    return models.editor_spec(key).modal_class
+
+
+def _warm_up(class_name: str = "PreviewRenderer") -> None:
+    """Start the editor's container in the background (at most every WARM_EVERY_S each)."""
     now = time.time()
-    if now - _last_warm[0] < WARM_EVERY_S:
+    if now - _last_warm.get(class_name, 0.0) < WARM_EVERY_S:
         return
-    _last_warm[0] = now
+    _last_warm[class_name] = now
 
     def call() -> None:
         try:
-            PREVIEWS.client.warm_preview()
+            PREVIEWS.client.warm_preview(class_name)
         except Exception as e:  # no Modal locally, or a deploy without `warm`
             print(f"warm-up skipped: {e!r}")
 
@@ -1372,7 +1378,7 @@ def on_futures_open(scene_id: str | None, vp_id: str | None):
     Outputs: intro, strip, vp ids, selected vp, name, starter radio, starters text,
     editor, gallery, tile keys, picked.
     """
-    _warm_up()
+    _warm_up(_editor_class(scene_id))
     if not scene_id:
         empty = [[], [], None, "", gr.update(choices=["none"], value="none"), "", gr.skip()]
         return ["Pick a finished scene first.", *empty, gr.update(value=[]), [], []]
@@ -1444,7 +1450,10 @@ def _start_view_render(scene_id: str, vp: viewpoints.Viewpoint) -> dict | None:
     """Render a new viewpoint on Modal; returns the pending call, or None if it failed."""
     try:
         call = PREVIEWS.client.submit_view(
-            _version_path(scene_id, vp.version), vp.camera, viewpoints.view_prefix(scene_id, vp.id)
+            _version_path(scene_id, vp.version),
+            vp.camera,
+            viewpoints.view_prefix(scene_id, vp.id),
+            class_name=_editor_class(scene_id),
         )
     except Exception as e:
         print(f"view render not started: {e!r}")
@@ -1726,6 +1735,7 @@ def on_save_future_settings(scene_id, text, editor):
     except viewpoints.ViewpointError as e:
         raise gr.Error(str(e)) from e
     _save_setup(scene_id, setup)
+    _warm_up(_editor_class(scene_id))
     n = len(setup.starters)
     msg = (
         f"Saved {n} starter direction{'s' if n != 1 else ''}; editor "
@@ -2218,6 +2228,9 @@ def build() -> gr.Blocks:
                                     fu_editor = gr.Dropdown(
                                         [(e.name, k) for k, e in models.EDITORS.items()],
                                         value=models.DEFAULT_EDITOR, label="Editor",
+                                        info="SDXL restyles the whole view. Kontext follows "
+                                        'instructions ("remove the chairs", "make the chairs '
+                                        'red") and keeps the rest; slower, larger GPU.',
                                     )  # fmt: skip
                                     fu_settings_save = gr.Button("Save settings")
                                 fu_vp, fu_vp_ids, fu_job = (

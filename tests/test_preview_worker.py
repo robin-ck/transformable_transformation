@@ -69,16 +69,16 @@ def test_futures_render_once_per_viewpoint_and_commit_once(monkeypatch) -> None:
     monkeypatch.setattr(Cls, "_render", fake_render)
     w = Cls.__new__(Cls)
     w.loads, w.editor, w.views, w.images = LoadTimes(), FakeEditor(), {}, {}
-    render_view = Cls.__dict__["render_view"]._get_raw_f()
-    render = Cls.__dict__["render"]._get_raw_f()
+    render_view = Cls.render_view._get_raw_f()
+    render = Cls.render._get_raw_f()
 
     cam = {
         "c2w": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
         "fov_deg": 50,
         "aspect": 1,
     }
-    render_view = Cls.__dict__["render_view"]._get_raw_f()
-    render = Cls.__dict__["render"]._get_raw_f()
+    render_view = Cls.render_view._get_raw_f()
+    render = Cls.render._get_raw_f()
 
     # 1. Save a viewpoint.
     res = render_view(w, "scenes/s/v1", cam, "viewpoints/s/a")
@@ -151,3 +151,14 @@ def test_futures_render_once_per_viewpoint_and_commit_once(monkeypatch) -> None:
     )
     assert res["status"] == "failed" and COMMITS[-1] == ["previews/j7/run.json"]
     assert json.loads(REPO["previews/j7/run.json"])["status"] == "failed"
+
+
+def test_every_editor_has_a_modal_class_running_it(monkeypatch) -> None:
+    from splat_studio import models
+
+    monkeypatch.syspath_prepend(str(ROOT / "modal_app"))
+    import app
+
+    for key, spec in models.EDITORS.items():
+        cls = getattr(app, spec.modal_class)._get_user_cls()
+        assert cls.EDITOR == key

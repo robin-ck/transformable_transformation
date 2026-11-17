@@ -3,8 +3,8 @@
 Deploy:  modal deploy modal_app/app.py
 Spike:   modal run modal_app/app.py::gpu_probe
 Object, preview, edit and image jobs are classes (ObjectGenerator, PreviewRenderer,
-SceneEditor, ImageStudio) that load their models once per container and stay warm for
-WARM_S after the last call.
+KontextRenderer, SceneEditor, ImageStudio) that load their models once per container and
+stay warm for WARM_S after the last call.
 Needs a Modal secret named `huggingface-secret` with HF_TOKEN, and the env var
 SPLAT_STUDIO_DATASET (e.g. "your-name/splat-studio-data") set on that secret.
 """
@@ -31,15 +31,16 @@ CPU_CORES = 4.0
 # for Python 3.10; on 3.11 pip took PyPI's pure-Python wheel, which JIT-compiles the
 # kernels on the first render of every new container (70 to 90 s; speed-up-edit-jobs 1).
 # The build container has no GPU, so the CUDA archs are set explicitly:
-# 8.6 = A10G, 8.9 = L4 and L40S. Extensions without isolation see the torch installed
-# above. Modal's add_python interpreter was built with clang, so extensions would look
-# for clang++; point them at the image's gcc instead.
+# 8.0 = A100, 8.6 = A10G, 8.9 = L4 and L40S, 9.0 = H100. A GPU whose arch is missing
+# fails at the first render ("Failed to set maximum shared memory size"). Extensions
+# without isolation see the torch installed above. Modal's add_python interpreter was
+# built with clang, so extensions would look for clang++; point them at the image's gcc.
 gsplat_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0", "build-essential")
     .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
     .pip_install("setuptools", "wheel", "ninja", "jaxtyping", "rich>=12")
-    .env({"TORCH_CUDA_ARCH_LIST": "8.6;8.9", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
+    .env({"TORCH_CUDA_ARCH_LIST": "8.0;8.6;8.9;9.0", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
     .run_commands(
         f"git clone --depth 1 --recursive --shallow-submodules --branch v{GSPLAT_VERSION} "
         f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
@@ -135,6 +136,26 @@ preview_image = (
         "diffusers==0.31.0",
         "transformers==4.46.3",
         "accelerate==1.1.1",
+        "safetensors",
+        "pillow",
+    )
+    .env({"HF_HOME": f"{MODELS_DIR}/hf"})
+    .add_local_python_source("splat_studio")
+)
+
+# Futures with FLUX.1 Kontext dev (models.EDITORS["flux-kontext"]): the same gsplat render
+# as the preview image, plus a diffusers release with FluxKontextPipeline (0.34+). The
+# 12 B transformer and T5 in bf16 need about 34 GB, so an L40S (48 GB); A100-80GB or
+# H100 if no L40S is free (gsplat's kernels are built for all three).
+KONTEXT_GPUS = ["L40S", "A100-80GB", "H100"]
+
+kontext_image = (
+    gsplat_image.pip_install(
+        "diffusers==0.35.1",
+        "transformers==4.53.3",
+        "accelerate==1.10.1",
+        "sentencepiece",
+        "protobuf",
         "safetensors",
         "pillow",
     )
@@ -734,7 +755,6 @@ def check_edit_image() -> dict:
     return out
 
 
-PREVIEW_EDITOR = "sdxl-depth"  # models.EDITORS key of the editor this class runs
 VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of the view
 
 
@@ -755,23 +775,18 @@ def _printable(result: dict) -> str:
     return json.dumps({k: v for k, v in result.items() if not isinstance(v, bytes)})
 
 
-@app.cls(
-    image=preview_image,
-    gpu=PREVIEW_GPUS,
-    timeout=PREVIEW_TIMEOUT_S,
-    secrets=[hf_secret],
-    volumes={MODELS_DIR: models_volume},
-    retries=0,
-    scaledown_window=WARM_S,
-    max_containers=1,
-)
-class PreviewRenderer:
-    """Render the scene from the viewer's camera and restyle it (SDXL + depth ControlNet).
+class _ViewRestyler:
+    """Render the scene from the viewer's camera and restyle it with one editor.
 
-    The models and gsplat's kernels are set up once per container, in `load`. Viewpoint
-    images (add-viewpoint-futures) and recent restyled images stay in memory, so later
-    futures of the same viewpoint, or built on a recent future, download nothing.
+    Each subclass below is a Modal class for one `models.EDITORS` entry (`EDITOR`), with
+    its own image and GPU. The models and gsplat's kernels are set up once per container,
+    in `load`. Viewpoint images (add-viewpoint-futures) and recent restyled images stay in
+    memory, so later futures of the same viewpoint, or built on a recent future, download
+    nothing.
     """
+
+    EDITOR = "sdxl-depth"  # models.EDITORS key; set by each subclass
+    GPUS = PREVIEW_GPUS
 
     @modal.enter()
     def load(self) -> None:
@@ -790,7 +805,7 @@ class PreviewRenderer:
         t = time.time()
         from splat_studio.editing import restyle
 
-        editor = restyle.make_editor(PREVIEW_EDITOR)
+        editor = restyle.make_editor(self.EDITOR)
         self.loads.record("imports", time.time() - t)
 
         # The kernels are prebuilt in the image; this loads them and the CUDA context.
@@ -799,7 +814,16 @@ class PreviewRenderer:
         self.loads.record("warm_gsplat", time.time() - t)
 
         t = time.time()
-        editor.load()
+        try:
+            editor.load()
+        except Exception as e:  # a gated model whose licence the token has not accepted
+            if "gated" in str(e).lower() or "401" in str(e) or "403" in str(e):
+                from splat_studio import models
+                from splat_studio.reconstruction import errors
+
+                repo_id = models.editor_spec(self.EDITOR).models[0].repo_id
+                raise errors.model_access(repo_id, repr(e)) from e
+            raise
         self.editor = editor
         models_volume.commit()  # keep downloaded weights for the next container
         self.loads.record("load_models", time.time() - t)
@@ -996,7 +1020,7 @@ class PreviewRenderer:
         repo = os.environ["SPLAT_STUDIO_DATASET"]
         api = HfApi()
         prefix = f"previews/{job_id}"
-        gpu = gpu_from_device_name(torch.cuda.get_device_name(0), PREVIEW_GPUS[0])
+        gpu = gpu_from_device_name(torch.cuda.get_device_name(0), self.GPUS[0])
         log = RunLog(job_id=job_id, gpu=gpu)
         # The "running" run.json goes up in the background; it is joined before the final
         # commit, so it can never overwrite the finished one.
@@ -1004,7 +1028,7 @@ class PreviewRenderer:
             target=_upload_json, args=(api, repo, f"{prefix}/run.json", log.to_dict())
         )
         started.start()
-        spec = models.editor_spec(PREVIEW_EDITOR)
+        spec = models.editor_spec(self.EDITOR)
 
         try:
             if self.editor is None:
@@ -1091,6 +1115,41 @@ class PreviewRenderer:
             _upload_json(api, repo, f"{prefix}/run.json", result)
         print(_printable(result))
         return result
+
+
+@app.cls(
+    image=preview_image,
+    gpu=PREVIEW_GPUS,
+    timeout=PREVIEW_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+    scaledown_window=WARM_S,
+    max_containers=1,
+)
+class PreviewRenderer(_ViewRestyler):
+    """Preview tool and futures with SDXL + depth ControlNet (the default editor)."""
+
+    EDITOR = "sdxl-depth"
+    GPUS = PREVIEW_GPUS
+
+
+@app.cls(
+    image=kontext_image,
+    gpu=KONTEXT_GPUS,
+    timeout=PREVIEW_TIMEOUT_S,
+    secrets=[hf_secret],
+    volumes={MODELS_DIR: models_volume},
+    retries=0,
+    scaledown_window=WARM_S,
+    max_containers=1,
+)
+class KontextRenderer(_ViewRestyler):
+    """Futures with FLUX.1 Kontext dev: instruction edits that keep the rest of the view.
+    Test:  modal run modal_app/app.py::KontextRenderer.warm"""
+
+    EDITOR = "flux-kontext"
+    GPUS = KONTEXT_GPUS
 
 
 @app.cls(

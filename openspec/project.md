@@ -20,4 +20,5 @@ Turn a user's video or photo set into a 3D Gaussian splat scene, view it in a br
 ## Constraints
 - Stay within Modal's free monthly credit for v1: cap job runtime and GPU type per job.
 - Only open-licence models whose licence allows the intended (research) use.
+  - Exception (2026-11-17): FLUX.1 Kontext dev (FLUX.1 [dev] non-commercial licence) as an optional, non-default futures editor, for research use only (`models.RESEARCH_ONLY_LICENCES`). Remove or replace it before any commercial use.
 - Inputs: one video (≤ 2 min, ≤ 1 GB) or 20 to 300 photos.
