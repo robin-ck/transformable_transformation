@@ -443,6 +443,7 @@ def _delete_plan(scene_id: str | None) -> scenes.DeletePlan:
         objects=of_scene(OBJECTS),
         previews=updated(PREVIEWS, previews),
         edits=of_scene(EDITS),
+        viewpoints=job.job_id in STORE.list_dirs("viewpoints"),
     )
 
 

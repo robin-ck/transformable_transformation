@@ -189,3 +189,30 @@ def test_details_markdown() -> None:
     text = scenes.details_markdown(job, 3, "Standard: 7,000 steps")
     assert f"`{SCENE}`" in text and "1970-01-01 01:00 UTC" in text
     assert "**Versions:** 3" in text and "Standard: 7,000 steps" in text
+
+
+def test_delete_includes_viewpoints_and_futures(store: LocalStore) -> None:
+    from splat_studio.space import viewpoints
+
+    setup = viewpoints.load_setup(store, SCENE)
+    vp = viewpoints.add_viewpoint(setup, "bridge", 2, {"c2w": [[1, 0, 0, 0]] * 4})
+    viewpoints.save_setup(store, SCENE, setup)
+    (store.root / viewpoints.view_prefix(SCENE, vp.id)).mkdir(parents=True)
+    (store.root / viewpoints.view_prefix(SCENE, vp.id) / "render.png").write_bytes(b"x")
+    future = _job("f1", "preview", scene_path=f"scenes/{SCENE}/v2", viewpoint=vp.id)
+    _put(store, "previews", future, ("preview.png",))
+
+    def listed(prefix: str) -> list[Job]:
+        return JobManager(store, prefix=prefix).list(refresh=False)
+
+    plan = scenes.delete_plan(
+        SCENE, 2, listed("objects"), listed("previews"), listed("edits"), viewpoints=True
+    )
+    assert f"viewpoints/{SCENE}" in plan.folders and "previews/f1" in plan.folders
+    assert plan.counts["previews"] == 2
+    scenes.delete_scene(store, plan)
+    assert not (store.root / "viewpoints" / SCENE).exists()
+    assert not (store.root / "previews/f1").exists()
+    assert (store.root / "previews/p2").exists()
+    # Without a viewpoints folder nothing is added (the Hub refuses missing folders).
+    assert not any(f.startswith("viewpoints/") for f in _plan(store, OTHER).folders)

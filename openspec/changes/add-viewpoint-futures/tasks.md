@@ -10,10 +10,15 @@
   - `tests/test_models.py`: 4 new tests; 213 passed.
 
 ## 2. Viewpoints
-- [ ] 2.1 `space/viewpoints.py`: read and write `viewpoints/<scene>/setup.json` (add, rename, reorder, remove viewpoints; add, edit, remove starters; editor per scene); pure logic, tests with `LocalStore`
-- [ ] 2.2 Worker: `PreviewRenderer.render_view(scene_path, camera, out_prefix)` uploads `render.png`, `depth.png`, `view.json` in one commit
+- [x] 2.1 `space/viewpoints.py`: read and write `viewpoints/<scene>/setup.json` (add, rename, reorder, remove viewpoints; add, edit, remove starters; editor per scene); pure logic, tests with `LocalStore`
+  - A scene without `setup.json` starts with four default starters (nature first, flood safe, recreation, housing), which the user can change. Starters are edited as one "label: prompt text" per line; a label that existed keeps its id. Viewpoints also store the viewer's orbit centre (`target`), so picking one puts the viewer back exactly. `same_view` tells whether the viewer is still at a viewpoint (position and direction; fov and aspect ignored).
+  - `tests/test_viewpoints.py`: 6 tests; 219 passed.
+- [x] 2.2 Worker: `PreviewRenderer.render_view(scene_path, camera, out_prefix)` uploads `render.png`, `depth.png`, `view.json` in one commit
+  - The render step is now `PreviewRenderer._render`, shared with `render`. `render_view` returns the render as JPEG bytes (for the thumbnail) and keeps the images in the container's memory. Also a `warm()` method: the design called it "existing", but there was none; it only starts a container (models load in `@modal.enter`). `modal_client.submit_view` and `warm_preview`.
+  - `tests/test_preview_worker.py` runs `render_view` and `render` with the GPU, editor and Hub stubbed and checks every commit's file list (skipped where `modal` is not installed, e.g. CI). Not run on a GPU (6.2).
 - [ ] 2.3 Space: Futures sub-tab with the viewpoint strip, "Save current view" (uses the viewer's camera and the shown version), rename, move up/down, remove; picking a viewpoint moves the viewer to it
-- [ ] 2.4 `scenes.delete_plan` includes `viewpoints/<scene_id>`; test
+- [x] 2.4 `scenes.delete_plan` includes `viewpoints/<scene_id>`; test
+  - Only when the folder exists (`viewpoints=` flag; the Space checks `list_dirs("viewpoints")`), since the Hub refuses to delete a missing folder. Futures are previews of the scene, so already covered. Test in `tests/test_scenes.py`; 221 passed. (Done before 2.3, which needs the whole Futures sub-tab.)
 
 ## 3. Futures
 - [ ] 3.1 `space/futures.py`: build the job params (viewpoint, starter id and text, parent, editor), compose the prompt (starter first, 300-character limit), list a viewpoint's futures (newest first, in-memory cache of finished records); tests

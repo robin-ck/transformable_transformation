@@ -738,6 +738,23 @@ PREVIEW_EDITOR = "sdxl-depth"  # models.EDITORS key of the editor this class run
 VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of the view
 
 
+VIEW_FILES = ("render.png", "depth.png", "view.json")  # a viewpoint's stored files
+KEEP_IMAGES = 16  # finished futures kept in memory per container, as parents for the next
+
+
+def _jpeg(img, quality: int = 90) -> bytes:
+    """A PIL image as JPEG bytes (returned to the Space, which shows it at once)."""
+    import io
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _printable(result: dict) -> str:
+    return json.dumps({k: v for k, v in result.items() if not isinstance(v, bytes)})
+
+
 @app.cls(
     image=preview_image,
     gpu=PREVIEW_GPUS,
@@ -751,7 +768,9 @@ VIEWER_BACKGROUND = (31, 36, 48)  # the viewer's #1f2430, behind empty parts of 
 class PreviewRenderer:
     """Render the scene from the viewer's camera and restyle it (SDXL + depth ControlNet).
 
-    The models and gsplat's kernels are set up once per container, in `load`.
+    The models and gsplat's kernels are set up once per container, in `load`. Viewpoint
+    images (add-viewpoint-futures) and recent restyled images stay in memory, so later
+    futures of the same viewpoint, or built on a recent future, download nothing.
     """
 
     @modal.enter()
@@ -760,6 +779,8 @@ class PreviewRenderer:
 
         self.loads = LoadTimes()
         self.editor = None
+        self.views: dict[str, tuple] = {}  # view prefix -> (render, control, view info)
+        self.images: dict[str, object] = {}  # dataset path -> restyled PIL image
         try:
             self._load_models()
         except Exception as e:  # reported by the next job, which loads again
@@ -784,6 +805,159 @@ class PreviewRenderer:
         self.loads.record("load_models", time.time() - t)
 
     @modal.method()
+    def warm(self) -> dict:
+        """Start a container (models load in `load`) before the user clicks Make."""
+        return {"warm": self.editor is not None}
+
+    def _render(self, repo: str, scene_path: str, camera: dict, stage) -> tuple:
+        """Render colour and depth of `scene_path` from `camera`.
+
+        Returns (render, control, view info); `stage(name, seconds)` records timings.
+        Raises `errors.preview_empty` for a view that shows almost nothing.
+        """
+        import numpy as np
+        import torch
+        from gsplat import rasterization
+        from PIL import Image
+
+        from splat_studio.editing import preview
+        from splat_studio.reconstruction import errors
+
+        cam = preview.ViewCamera.from_dict(camera)
+        width, height = preview.output_size(cam.aspect)
+
+        t = time.time()
+        _reload_volume()
+        splat_file, cached = _cached_scene_file(repo, f"{scene_path}/scene.splat")
+        g = preview.read_splat(Path(splat_file).read_bytes())
+        stage("download_scene", time.time() - t)
+
+        t = time.time()
+
+        def tensor(a):
+            return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float32, device="cuda")
+
+        # RGB+ED renders colour plus expected depth. The background is blended in below:
+        # gsplat pads the channel count internally, so its `backgrounds` argument does
+        # not fit this mode.
+        with torch.no_grad():
+            colors, alphas, _ = rasterization(
+                means=tensor(g.means),
+                quats=tensor(g.quats),
+                scales=tensor(g.scales),
+                opacities=tensor(g.opacities),
+                colors=tensor(g.colors),
+                viewmats=tensor(preview.viewmat(cam))[None],
+                Ks=tensor(preview.intrinsics(cam, width, height))[None],
+                width=width,
+                height=height,
+                render_mode="RGB+ED",
+            )
+        depth = colors[0, ..., 3].cpu().numpy()
+        alpha = alphas[0, ..., 0].cpu().numpy()
+        bg = np.array(VIEWER_BACKGROUND, dtype=np.float32) / 255
+        rgb = colors[0, ..., :3].cpu().numpy() + (1 - alpha[..., None]) * bg
+        rgb = np.clip(rgb, 0, 1)
+        del colors, alphas
+        torch.cuda.empty_cache()
+        render = Image.fromarray((rgb * 255).round().astype(np.uint8))
+        control = Image.fromarray(preview.depth_to_control(depth, alpha)).convert("RGB")
+        seconds = time.time() - t
+        stage("render", seconds)
+        if (alpha >= preview.MIN_ALPHA).mean() < 0.05:
+            raise errors.preview_empty()
+        info = {
+            "camera": camera,
+            "size": [width, height],
+            "source_scene": scene_path,
+            "num_gaussians": len(g),
+            "scene_cached": cached,
+            "render_seconds": round(seconds, 2),
+            "created_at": time.time(),
+        }
+        return render, control, info
+
+    def _stored_view(self, repo: str, view_prefix: str) -> tuple | None:
+        """A viewpoint's (render, control, info) from memory, else from the dataset."""
+        if view_prefix in self.views:
+            return self.views[view_prefix]
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError
+        from PIL import Image
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                paths = {
+                    n: hf_hub_download(repo, f"{view_prefix}/{n}", repo_type="dataset",
+                                       cache_dir=tmp)
+                    for n in VIEW_FILES
+                }  # fmt: skip
+                render = Image.open(paths["render.png"]).convert("RGB")
+                control = Image.open(paths["depth.png"]).convert("RGB")
+                info = json.loads(Path(paths["view.json"]).read_text())
+        except EntryNotFoundError:
+            return None
+        self.views[view_prefix] = (render, control, info)
+        return self.views[view_prefix]
+
+    def _input_image(self, repo: str, path: str):
+        """A parent future's restyled image (dataset path), from memory or the dataset."""
+        if path in self.images:
+            return self.images[path]
+        from huggingface_hub import hf_hub_download
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            local = hf_hub_download(repo, path, repo_type="dataset", cache_dir=tmp)
+            return Image.open(local).convert("RGB")
+
+    def _keep_image(self, path: str, img) -> None:
+        self.images[path] = img
+        while len(self.images) > KEEP_IMAGES:
+            self.images.pop(next(iter(self.images)))
+
+    @modal.method()
+    def render_view(self, scene_path: str, camera: dict, out_prefix: str) -> dict:
+        """Render a viewpoint once (add-viewpoint-futures) and store it under `out_prefix`
+        (`viewpoints/<scene>/<vp>`): render.png, depth.png and view.json in one commit.
+
+        Returns {"status", "view" (view.json), "image_jpeg" (the render)} or a failed
+        {"status", "error"}.
+        """
+        from huggingface_hub import HfApi
+
+        from splat_studio.hub_outputs import commit_files
+        from splat_studio.reconstruction import errors
+
+        repo = os.environ["SPLAT_STUDIO_DATASET"]
+        stages: dict[str, float] = {}
+        try:
+            if self.editor is None:
+                self._load_models()  # the next future then finds the models loaded
+            render, control, info = self._render(
+                repo, scene_path, camera, lambda n, s: stages.__setitem__(n, round(s, 2))
+            )
+            t = time.time()
+            with tempfile.TemporaryDirectory() as tmp:
+                render.save(Path(tmp) / "render.png")
+                control.save(Path(tmp) / "depth.png")
+                files = {f"{out_prefix}/render.png": Path(tmp) / "render.png",
+                         f"{out_prefix}/depth.png": Path(tmp) / "depth.png",
+                         f"{out_prefix}/view.json": info}  # fmt: skip
+                commit_files(HfApi(), repo, files, f"Viewpoint {out_prefix}")
+            stages["upload"] = round(time.time() - t, 2)
+            self.views[out_prefix] = (render, control, info)
+            result = {"status": "done", "view": info, "stages": stages,
+                      "image_jpeg": _jpeg(render)}  # fmt: skip
+        except errors.ReconstructionError as e:
+            result = {"status": "failed", "error": e.to_dict(), "stages": stages}
+        except Exception as e:
+            result = {"status": "failed", "error": errors.preview_failed(repr(e)).to_dict(),
+                      "stages": stages}  # fmt: skip
+        print(_printable(result))
+        return result
+
+    @modal.method()
     def render(
         self,
         job_id: str,
@@ -794,17 +968,27 @@ class PreviewRenderer:
         strength: float = 0.7,
         control_scale: float = 0.6,
         steps: int = 30,
+        view_prefix: str | None = None,
+        input_path: str | None = None,
     ) -> dict:
-        """Uploads to previews/<job_id>/: render.png (plain view), depth.png (control image)
-        and preview.png. `camera` is `editing.preview.ViewCamera.to_dict()`."""
-        import numpy as np
+        """Restyle a view; uploads preview.png to previews/<job_id>/ and returns the image.
+
+        Without `view_prefix` (the Preview tool): renders `camera`, and also uploads
+        render.png and depth.png to previews/<job_id>/.
+        With `view_prefix` (a future): starts from the viewpoint's stored render and depth
+        and does not render; if the viewpoint has no stored images yet (a new viewpoint
+        from the current view), renders `camera` and stores them under `view_prefix` in
+        the same commit. `input_path` (a parent future's preview.png) replaces the render
+        as the image to restyle; the depth always comes from the viewpoint.
+        The result carries the restyled image as JPEG bytes in `image_jpeg`.
+        `camera` is `editing.preview.ViewCamera.to_dict()`.
+        """
+        import threading
+
         import torch
-        from gsplat import rasterization
         from huggingface_hub import HfApi
-        from PIL import Image
 
         from splat_studio import models
-        from splat_studio.editing import preview
         from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
@@ -814,59 +998,43 @@ class PreviewRenderer:
         prefix = f"previews/{job_id}"
         gpu = gpu_from_device_name(torch.cuda.get_device_name(0), PREVIEW_GPUS[0])
         log = RunLog(job_id=job_id, gpu=gpu)
-        _upload_json(api, repo, f"{prefix}/run.json", log.to_dict())
-        model_label = models.editor_spec(PREVIEW_EDITOR).label
+        # The "running" run.json goes up in the background; it is joined before the final
+        # commit, so it can never overwrite the finished one.
+        started = threading.Thread(
+            target=_upload_json, args=(api, repo, f"{prefix}/run.json", log.to_dict())
+        )
+        started.start()
+        spec = models.editor_spec(PREVIEW_EDITOR)
 
         try:
             if self.editor is None:
                 self._load_models()  # enter failed: load here so the error is reported
             self.loads.apply(log)
-            cam = preview.ViewCamera.from_dict(camera)
-            width, height = preview.output_size(cam.aspect)
+            files: dict = {}
+            view = self._stored_view(repo, view_prefix) if view_prefix else None
+            if view is None:
+                if camera is None:
+                    raise errors.preview_failed(f"viewpoint {view_prefix} has no stored images")
+                view = self._render(repo, scene_path, camera, log.stage)
+                render, control, view_info = view
+                out = view_prefix or prefix
+                files[f"{out}/render.png"], files[f"{out}/depth.png"] = render, control
+                if view_prefix:
+                    files[f"{view_prefix}/view.json"] = view_info
+                    self.views[view_prefix] = view
+            render, control, view_info = view
 
-            t = time.time()
-            _reload_volume()
-            splat_file, cached = _cached_scene_file(repo, f"{scene_path}/scene.splat")
-            g = preview.read_splat(Path(splat_file).read_bytes())
-            log.stage("download_scene", time.time() - t)
-
-            t = time.time()
-
-            def tensor(a):
-                return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float32, device="cuda")
-
-            # RGB+ED renders colour plus expected depth. The background is blended in below:
-            # gsplat pads the channel count internally, so its `backgrounds` argument does
-            # not fit this mode.
-            with torch.no_grad():
-                colors, alphas, _ = rasterization(
-                    means=tensor(g.means),
-                    quats=tensor(g.quats),
-                    scales=tensor(g.scales),
-                    opacities=tensor(g.opacities),
-                    colors=tensor(g.colors),
-                    viewmats=tensor(preview.viewmat(cam))[None],
-                    Ks=tensor(preview.intrinsics(cam, width, height))[None],
-                    width=width,
-                    height=height,
-                    render_mode="RGB+ED",
-                )
-            depth = colors[0, ..., 3].cpu().numpy()
-            alpha = alphas[0, ..., 0].cpu().numpy()
-            bg = np.array(VIEWER_BACKGROUND, dtype=np.float32) / 255
-            rgb = colors[0, ..., :3].cpu().numpy() + (1 - alpha[..., None]) * bg
-            rgb = np.clip(rgb, 0, 1)
-            del colors, alphas
-            torch.cuda.empty_cache()
-            render = Image.fromarray((rgb * 255).round().astype(np.uint8))
-            control = Image.fromarray(preview.depth_to_control(depth, alpha)).convert("RGB")
-            log.stage("render", time.time() - t)
-            if (alpha >= preview.MIN_ALPHA).mean() < 0.05:
-                raise errors.preview_empty()
+            image = render
+            if input_path:
+                t = time.time()
+                image = self._input_image(repo, input_path)
+                if image.size != render.size:
+                    image = image.resize(render.size)
+                log.stage("download_input", time.time() - t)
 
             t = time.time()
             styled = self.editor.restyle(
-                render,
+                image,
                 control,
                 prompt,
                 seed,
@@ -875,28 +1043,40 @@ class PreviewRenderer:
                 steps=steps,
             )
             log.stage("restyle", time.time() - t)
+            files[f"{prefix}/preview.png"] = styled
+            self._keep_image(f"{prefix}/preview.png", styled)
 
             info = {
                 "scene_path": prefix,
                 "source_scene": scene_path,
-                "model": model_label,
+                "model": spec.label,
+                "editor": spec.key,
                 "prompt": prompt,
                 "seed": seed,
                 "strength": strength,
                 "control_scale": control_scale,
                 "steps": steps,
-                "size": [width, height],
-                "num_gaussians": len(g),
-                "scene_cached": cached,
+                "size": view_info["size"],
+                "num_gaussians": view_info.get("num_gaussians"),
+                "scene_cached": view_info.get("scene_cached"),
+                "view_prefix": view_prefix,
+                "input_path": input_path,
+                "view_rendered": f"{view_prefix or prefix}/render.png" in files,
             }
+            jpeg = _jpeg(styled)
+            started.join()
             with tempfile.TemporaryDirectory() as tmp:
-                images = {"render.png": render, "depth.png": control, "preview.png": styled}
-                for name, img in images.items():
-                    img.save(Path(tmp) / name)
-                files = {f"{prefix}/{name}": Path(tmp) / name for name in images}
+                upload = {}
+                for path, value in files.items():
+                    if hasattr(value, "save"):  # a PIL image
+                        local = Path(tmp) / path.replace("/", "_")
+                        value.save(local)
+                        value = local
+                    upload[path] = value
                 result = finish_with_outputs(
-                    api, repo, prefix, log, files, info, f"Preview {job_id}"
+                    api, repo, prefix, log, upload, info, f"Preview {job_id}"
                 )
+            result["image_jpeg"] = jpeg
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
@@ -906,9 +1086,10 @@ class PreviewRenderer:
             err.detail = traceback.format_exc()[-errors.DETAIL_CHARS :]
             result = log.finish("failed", err.to_dict()).to_dict()
 
+        started.join()
         if result["status"] != "done":  # a done run.json went in with the images
             _upload_json(api, repo, f"{prefix}/run.json", result)
-        print(json.dumps(result))
+        print(_printable(result))
         return result
 
 
