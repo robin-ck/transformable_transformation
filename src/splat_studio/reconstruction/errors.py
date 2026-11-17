@@ -134,6 +134,16 @@ def object_not_found(query: str) -> ReconstructionError:
     )
 
 
+def area_empty() -> ReconstructionError:
+    """'Area to change' (add-area-layout) arrived empty or too small at the worker."""
+    return ReconstructionError(
+        "area_empty",
+        "The drawn area is empty or too small, so nothing was changed.",
+        "Tip: paint over the part of the view that should change, or clear the drawing "
+        "to change the whole view.",
+    )
+
+
 def edit_failed(detail: str) -> ReconstructionError:
     return ReconstructionError(
         "edit_failed",

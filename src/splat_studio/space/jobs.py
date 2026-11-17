@@ -360,13 +360,15 @@ class JobManager:
         strength: float = 0.7,
         future: dict | None = None,
         input_path: str | None = None,
+        area_png: bytes | None = None,
     ) -> Job:
         """Record a preview job (a 2D restyle of one view) and start it on Modal.
 
         `future` (`futures.future_params`) makes it a future of a viewpoint: the worker
         starts from the viewpoint's stored images, or renders `camera` and stores them if
         the viewpoint has none yet. `input_path` (a parent future's image) is restyled
-        instead of the render.
+        instead of the render. `area_png` (a future with `area` in its params) is the
+        painted area; it goes to the worker, which stores it as area.png.
         """
         now = self.clock()
         future = future or {}
@@ -383,6 +385,8 @@ class JobManager:
                 kwargs["steps"] = future["steps"]
             if future.get("object_query"):
                 kwargs["object_query"] = future["object_query"]
+            if future.get("area") and area_png:
+                kwargs["area_png"] = area_png
             if spec.modal_class != "PreviewRenderer":
                 kwargs["class_name"] = spec.modal_class
         if input_path:

@@ -258,6 +258,63 @@ def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
     assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]
 
 
+class CropEditor(RedEditor):
+    """Paints its whole input red and records the size and prompt it got."""
+
+    def restyle(self, image, depth, prompt, seed, **kw):
+        self.got = (image.size, depth.size, prompt)
+        return super().restyle(image, depth, prompt, seed, **kw)
+
+
+def test_drawn_area_edits_a_crop_and_keeps_the_rest(monkeypatch) -> None:
+    import io
+
+    import numpy as np
+
+    from splat_studio.editing import area
+
+    editor = CropEditor()
+    w, REPO, COMMITS, _ = _worker(monkeypatch, "KontextRenderer", editor, FakeMasker())
+    render_view = type(w).render_view._get_raw_f()
+    render = type(w).render._get_raw_f()
+    render_view(w, "scenes/s/v1", CAM, "viewpoints/s/a")
+
+    # Drawn at half the render's size: the worker scales it to the start image.
+    hard = np.zeros((32, 32), bool)
+    hard[4:8, 4:8] = True  # pixels 8..16 of the 64 x 64 render
+    res = render(w, "a1", "scenes/s/v1", CAM, "a willow", view_prefix="viewpoints/s/a",
+                 area_png=area.to_png(hard))  # fmt: skip
+    assert res["status"] == "done", res
+    assert COMMITS[-1] == ["previews/a1/area.png", "previews/a1/mask.png",
+                           "previews/a1/preview.png", "previews/a1/run.json"]  # fmt: skip
+    run = json.loads(REPO["previews/a1/run.json"])
+    x0, y0, x1, y1 = run["area"]["crop"]
+    assert editor.got[0] == editor.got[1] == (x1 - x0, y1 - y0) and x1 - x0 < 64
+    assert editor.got[2].startswith("a willow. Make the change in the middle")
+    assert run["area"]["bounds"] == [8, 8, 16, 16] and run["mask"] is None
+    assert {"area", "restyle", "composite"} <= set(run["stages"])
+    out = np.asarray(Image.open(io.BytesIO(REPO["previews/a1/preview.png"])))
+    mask = np.asarray(Image.open(io.BytesIO(REPO["previews/a1/mask.png"])))
+    assert res["mask_png"] == REPO["previews/a1/mask.png"]
+    assert (out[mask == 0] == [0, 128, 0]).all() and (out[12, 12] == [255, 0, 0]).all()
+    stored = area.from_png(REPO["previews/a1/area.png"])
+    assert stored.shape == (64, 64) and stored[12, 12] and not stored[30, 30]
+
+    # Empty area, area plus object, and an editor without a masker are refused.
+    n = editor.calls
+    res = render(w, "a2", "scenes/s/v1", CAM, "x", view_prefix="viewpoints/s/a",
+                 area_png=area.to_png(np.zeros((32, 32), bool)))  # fmt: skip
+    assert res["status"] == "failed" and res["error"]["code"] == "area_empty"
+    res = render(w, "a3", "scenes/s/v1", CAM, "x", view_prefix="viewpoints/s/a",
+                 object_query="chairs", area_png=area.to_png(hard))  # fmt: skip
+    assert res["status"] == "failed" and "both" in res["error"]["tip"]
+    w.masker = None
+    res = render(w, "a4", "scenes/s/v1", CAM, "x", view_prefix="viewpoints/s/a",
+                 area_png=area.to_png(hard))  # fmt: skip
+    assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]
+    assert editor.calls == n
+
+
 def test_detect_only_labels_the_plain_render_and_stores_nothing(monkeypatch) -> None:
     masker = FakeMasker()
     w, REPO, COMMITS, _ = _worker(monkeypatch, "KontextRenderer", RedEditor(), masker)
