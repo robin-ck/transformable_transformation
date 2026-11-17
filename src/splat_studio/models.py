@@ -101,6 +101,24 @@ KONTEXT = ModelSpec(
     role="instruction edits of a view or future (12 B transformer, bf16, about 34 GB)",
 )
 
+# Object masks for Kontext futures (add-object-masking): an open-vocabulary detector finds
+# boxes for the object the user names, SAM turns them into a mask; Kontext's result is
+# kept inside it only. Both run in the Kontext container. Read on 2026-11-17.
+MASK_DETECTOR = ModelSpec(
+    repo_id="IDEA-Research/grounding-dino-base",
+    revision="12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+    licence="apache-2.0",
+    gpu="L40S",
+    role="boxes of the object named in 'Object to change' (open-vocabulary detection)",
+)
+MASK_SEGMENTER = ModelSpec(
+    repo_id="facebook/sam-vit-large",
+    revision="6851e0441005b0fb96f2cc4dfac472f3d1b14af1",
+    licence="apache-2.0",
+    gpu="L40S",
+    role="mask of the detected boxes (Segment Anything, box prompts)",
+)
+
 
 @dataclass(frozen=True)
 class EditorSpec:
@@ -117,6 +135,9 @@ class EditorSpec:
     modal_class: str
     steps: int  # denoising steps for Quality (and the Preview tool)
     fast_steps: int  # denoising steps for Fast futures
+    # Detector and segmenter for "Object to change" (add-object-masking); empty: the
+    # editor cannot mask. Not part of `label`, so stored model labels stay the same.
+    mask_models: tuple[ModelSpec, ...] = ()
 
     @property
     def label(self) -> str:
@@ -126,6 +147,10 @@ class EditorSpec:
     @property
     def licence(self) -> str:
         return " + ".join(sorted({m.licence for m in self.models}))
+
+    @property
+    def can_mask(self) -> bool:
+        return bool(self.mask_models)
 
     @property
     def research_only(self) -> bool:
@@ -152,6 +177,7 @@ EDITORS = {
         # Kontext's own default (28); Fast (20) is about a third faster.
         steps=28,
         fast_steps=20,
+        mask_models=(MASK_DETECTOR, MASK_SEGMENTER),
     ),
 }
 DEFAULT_EDITOR = "sdxl-depth"
@@ -173,4 +199,6 @@ ALL = (
     PREVIEW_BASE,
     PREVIEW_DEPTH,
     KONTEXT,
+    MASK_DETECTOR,
+    MASK_SEGMENTER,
 )

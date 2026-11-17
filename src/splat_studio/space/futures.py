@@ -7,6 +7,8 @@ A future is a preview job (`previews/<job_id>/`, see `jobs.py`) whose `params` a
   own_prompt  the user's own text; `prompt` is what the editor got (starter first)
   parent      the job id of the future it was built on, or None
   editor      the `models.EDITORS` key
+  object_query  "Object to change" (add-object-masking): only that object may change;
+              absent when none was named. run.json's `mask` holds what was found.
 Old previews have no `viewpoint` and are not futures. Pure logic, no GPU.
 """
 
@@ -16,6 +18,7 @@ import time
 from pathlib import Path
 
 from splat_studio import models
+from splat_studio.editing import masking
 
 from .jobs import FINAL, Job, JobManager
 from .viewpoints import Starter, Viewpoint
@@ -65,11 +68,22 @@ def future_params(
     parent: Job | None = None,
     editor: str | None = None,
     speed: str | None = None,
+    object_query: str | None = None,
 ) -> dict:
     """The future-specific fields of the preview job's `params` (see the module doc)."""
     spec = models.editor_spec(editor)
     if parent is not None and parent.params.get("viewpoint") != vp.id:
         raise FutureError("A future can only be built on a future of the same viewpoint.")
+    try:
+        named = masking.object_phrases(object_query)
+    except masking.MaskError as e:
+        raise FutureError(str(e)) from e
+    if named and not spec.can_mask:
+        raise FutureError(
+            f"Only the FLUX.1 Kontext editor can limit changes to an object; this scene uses "
+            f"{spec.name}. Leave 'Object to change' empty, or pick Kontext under Settings."
+        )
+    extra = {"object_query": " ".join(object_query.split())} if named else {}
     return {
         "viewpoint": vp.id,
         "view_prefix": view_prefix,
@@ -82,6 +96,7 @@ def future_params(
         "model": spec.label,
         "speed": speed or DEFAULT_SPEED,
         "steps": steps_for(spec.key, speed),
+        **extra,
     }
 
 
@@ -147,6 +162,10 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
         lines.append(f"**Starter:** {starter.get('label')} ({starter.get('text')})")
     if p.get("parent"):
         lines.append(f"**Built on:** future `{p['parent']}`")
+    if p.get("object_query"):
+        n = (job.run.get("mask") or {}).get("detections")
+        found = f" ({n} found; the rest of the view is unchanged)" if n else ""
+        lines.append(f"**Object to change:** {p['object_query']}{found}")
     model = job.run.get("model") or p.get("model")
     steps = f" · {p['steps']} steps" if p.get("steps") else ""
     lines.append(f"**Editor:** {model}{steps} · seed {p.get('seed', 0)} · job `{job.job_id}`")

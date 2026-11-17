@@ -253,6 +253,8 @@ class JobManager:
         # Images a worker returned with its result (JPEG bytes, by job id); kept out of
         # job.json and shown by the Space before it fetches anything from the Hub.
         self.images: dict[str, bytes] = {}
+        # Object masks of masked futures (PNG bytes, by job id; add-object-masking).
+        self.masks: dict[str, bytes] = {}
 
     def _save(self, job: Job) -> Job:
         self.store.write_json(f"{self.prefix}/{job.job_id}/job.json", asdict(job))
@@ -377,6 +379,8 @@ class JobManager:
             kwargs["view_prefix"] = future["view_prefix"]
             if future.get("steps"):
                 kwargs["steps"] = future["steps"]
+            if future.get("object_query"):
+                kwargs["object_query"] = future["object_query"]
             if spec.modal_class != "PreviewRenderer":
                 kwargs["class_name"] = spec.modal_class
         if input_path:
@@ -444,6 +448,9 @@ class JobManager:
         image = result.pop("image_jpeg", None)
         if isinstance(image, bytes):
             self.images[job.job_id] = image
+        mask = result.pop("mask_png", None)
+        if isinstance(mask, bytes):
+            self.masks[job.job_id] = mask
         job.status = "done" if result.get("status") == "done" else "failed"
         job.error = result.get("error")
         job.scene_path = result.get("scene_path")

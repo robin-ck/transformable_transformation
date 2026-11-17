@@ -26,7 +26,9 @@ class FakeEditor:
         return Image.new("RGB", image.size, (seed % 255, 0, 0))
 
 
-def test_futures_render_once_per_viewpoint_and_commit_once(monkeypatch) -> None:
+def _worker(monkeypatch, cls_name: str = "PreviewRenderer", editor=None, masker=None):
+    """A Modal class instance with GPU, editor and Hub stubbed: (worker, REPO, COMMITS,
+    RENDERS); REPO is the fake dataset (path -> bytes)."""
     monkeypatch.syspath_prepend(str(ROOT / "modal_app"))
     torch = types.ModuleType("torch")
     torch.cuda = types.SimpleNamespace(get_device_name=lambda i: "NVIDIA L4")
@@ -65,18 +67,22 @@ def test_futures_render_once_per_viewpoint_and_commit_once(monkeypatch) -> None:
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
     monkeypatch.setenv("SPLAT_STUDIO_DATASET", "me/data")
-    Cls = app.PreviewRenderer._get_user_cls()
+    Cls = getattr(app, cls_name)._get_user_cls()
     monkeypatch.setattr(Cls, "_render", fake_render)
     w = Cls.__new__(Cls)
-    w.loads, w.editor, w.views, w.images = LoadTimes(), FakeEditor(), {}, {}
-    render_view = Cls.render_view._get_raw_f()
-    render = Cls.render._get_raw_f()
+    w.loads, w.editor, w.views, w.images = LoadTimes(), editor or FakeEditor(), {}, {}
+    w.masker = masker
+    return w, REPO, COMMITS, RENDERS
 
-    cam = {
-        "c2w": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-        "fov_deg": 50,
-        "aspect": 1,
-    }
+
+CAM = {"c2w": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], "fov_deg": 50,
+       "aspect": 1}  # fmt: skip
+
+
+def test_futures_render_once_per_viewpoint_and_commit_once(monkeypatch) -> None:
+    w, REPO, COMMITS, RENDERS = _worker(monkeypatch)
+    Cls = type(w)
+    cam = CAM
     render_view = Cls.render_view._get_raw_f()
     render = Cls.render._get_raw_f()
 
@@ -162,3 +168,86 @@ def test_every_editor_has_a_modal_class_running_it(monkeypatch) -> None:
     for key, spec in models.EDITORS.items():
         cls = getattr(app, spec.modal_class)._get_user_cls()
         assert cls.EDITOR == key
+
+
+class FakeMasker:
+    """Finds "chairs" as the box x 10..30, y 20..40 of a 64 x 64 image; nothing else."""
+
+    labels = ["det@1", "sam@2"]
+
+    def __init__(self):
+        self.calls = []
+
+    def detect(self, image, query):
+        from splat_studio.editing.masking import Detection
+
+        self.calls.append(("detect", query))
+        return [Detection((10, 20, 30, 40), 0.8, "chairs")] if "chair" in query else []
+
+    def segment(self, image, detections):
+        import numpy as np
+
+        self.calls.append(("segment", len(detections)))
+        hard = np.zeros(image.size[::-1], bool)
+        hard[20:40, 10:30] = True
+        return hard
+
+
+class RedEditor:
+    key = "flux-kontext"
+
+    def __init__(self):
+        self.calls = 0
+
+    def restyle(self, image, depth, prompt, seed, **kw):
+        self.calls += 1
+        return Image.new("RGB", image.size, (255, 0, 0))  # changes everything
+
+
+def test_object_mask_keeps_the_rest_of_the_view(monkeypatch) -> None:
+    import io
+
+    import numpy as np
+
+    masker, editor = FakeMasker(), RedEditor()
+    w, REPO, COMMITS, _ = _worker(monkeypatch, "KontextRenderer", editor, masker)
+    render_view = type(w).render_view._get_raw_f()
+    render = type(w).render._get_raw_f()
+    render_view(w, "scenes/s/v1", CAM, "viewpoints/s/a")
+
+    # 1. Masked future: red inside the chairs' mask, the green render everywhere else.
+    res = render(w, "m1", "scenes/s/v1", CAM, "make the chairs red", view_prefix="viewpoints/s/a",
+                 object_query="  chairs ")  # fmt: skip
+    assert res["status"] == "done", res
+    assert COMMITS[-1] == ["previews/m1/mask.png", "previews/m1/preview.png",
+                           "previews/m1/run.json"]  # fmt: skip
+    out = np.asarray(Image.open(io.BytesIO(REPO["previews/m1/preview.png"])))
+    mask = np.asarray(Image.open(io.BytesIO(REPO["previews/m1/mask.png"])))
+    assert res["mask_png"] == REPO["previews/m1/mask.png"]
+    assert (out[mask == 0] == [0, 128, 0]).all()  # PIL "green" is (0, 128, 0)
+    assert (out[30, 20] == [255, 0, 0]).all() and (out[0, 0] == [0, 128, 0]).all()
+    run = json.loads(REPO["previews/m1/run.json"])
+    assert {"detect", "segment", "restyle", "composite"} <= set(run["stages"])
+    assert run["object_query"] == "chairs"
+    assert run["mask"]["detections"] == 1 and run["mask"]["boxes"] == [[10, 20, 30, 40]]
+    assert run["mask"]["models"] == ["det@1", "sam@2"] and run["mask"]["removal"] is False
+
+    # 2. Not found: fails before the edit, with a message naming the object.
+    n = editor.calls
+    res = render(w, "m2", "scenes/s/v1", CAM, "paint the boat", view_prefix="viewpoints/s/a",
+                 object_query="boat")  # fmt: skip
+    assert res["status"] == "failed" and res["error"]["code"] == "object_not_found"
+    assert '"boat"' in res["error"]["message"] and editor.calls == n
+    assert COMMITS[-1] == ["previews/m2/run.json"]
+    assert "detect" in json.loads(REPO["previews/m2/run.json"])["stages"]
+
+    # 3. No query: no mask, Kontext's image as it is.
+    res = render(w, "m3", "scenes/s/v1", CAM, "make it red", view_prefix="viewpoints/s/a")
+    assert res["status"] == "done" and "mask_png" not in res and res["mask"] is None
+    assert COMMITS[-1] == ["previews/m3/preview.png", "previews/m3/run.json"]
+
+    # 4. An editor without a masker refuses the query.
+    w.masker = None
+    res = render(w, "m4", "scenes/s/v1", CAM, "x", view_prefix="viewpoints/s/a",
+                 object_query="chairs")  # fmt: skip
+    assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]

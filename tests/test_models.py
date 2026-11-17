@@ -112,3 +112,13 @@ def test_every_editor_sets_its_steps():
     assert models.editor_spec("sdxl-depth").steps == 30  # Preview tool keeps 30
     for spec in models.EDITORS.values():
         assert 0 < spec.fast_steps < spec.steps, spec.key
+
+
+def test_only_kontext_masks_with_open_models():
+    kontext = models.editor_spec("flux-kontext")
+    assert kontext.can_mask and not models.editor_spec("sdxl-depth").can_mask
+    assert kontext.mask_models == (models.MASK_DETECTOR, models.MASK_SEGMENTER)
+    for spec in kontext.mask_models:
+        assert spec in models.ALL and spec.licence in models.ALLOWED_LICENCES
+    # Mask models stay out of the editor's label, so old futures' labels still match.
+    assert kontext.label == models.KONTEXT.label

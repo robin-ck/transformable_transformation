@@ -771,6 +771,15 @@ def _jpeg(img, quality: int = 90) -> bytes:
     return buf.getvalue()
 
 
+def _png(img) -> bytes:
+    """A PIL image as PNG bytes (the mask returned to the Space)."""
+    import io
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _printable(result: dict) -> str:
     return json.dumps({k: v for k, v in result.items() if not isinstance(v, bytes)})
 
@@ -794,6 +803,7 @@ class _ViewRestyler:
 
         self.loads = LoadTimes()
         self.editor = None
+        self.masker = None  # editing.masking.ObjectMasker, for editors that can mask
         self.views: dict[str, tuple] = {}  # view prefix -> (render, control, view info)
         self.images: dict[str, object] = {}  # dataset path -> restyled PIL image
         try:
@@ -824,9 +834,22 @@ class _ViewRestyler:
                 repo_id = models.editor_spec(self.EDITOR).models[0].repo_id
                 raise errors.model_access(repo_id, repr(e)) from e
             raise
+        self.loads.record("load_models", time.time() - t)
+
+        # "Object to change" (add-object-masking): detector + SAM next to the editor.
+        from splat_studio import models
+
+        spec = models.editor_spec(self.EDITOR)
+        if spec.can_mask and self.masker is None:
+            from splat_studio.editing import masking
+
+            t = time.time()
+            masker = masking.ObjectMasker(*spec.mask_models)
+            masker.load()
+            self.masker = masker
+            self.loads.record("load_mask_models", time.time() - t)
         self.editor = editor
         models_volume.commit()  # keep downloaded weights for the next container
-        self.loads.record("load_models", time.time() - t)
 
     @modal.method()
     def warm(self) -> dict:
@@ -994,6 +1017,7 @@ class _ViewRestyler:
         steps: int | None = None,
         view_prefix: str | None = None,
         input_path: str | None = None,
+        object_query: str | None = None,
     ) -> dict:
         """Restyle a view; uploads preview.png to previews/<job_id>/ and returns the image.
 
@@ -1005,6 +1029,10 @@ class _ViewRestyler:
         the same commit. `input_path` (a parent future's preview.png) replaces the render
         as the image to restyle; the depth always comes from the viewpoint.
         The result carries the restyled image as JPEG bytes in `image_jpeg`.
+        `object_query` (add-object-masking, editors with a masker only) names the object to
+        change: it is detected and segmented in the start image first (fails with
+        `object_not_found` if absent), and the editor's result is kept only inside the
+        grown, feathered mask; mask.png goes up too and comes back as `mask_png`.
         `camera` is `editing.preview.ViewCamera.to_dict()`.
         """
         import threading
@@ -1013,6 +1041,7 @@ class _ViewRestyler:
         from huggingface_hub import HfApi
 
         from splat_studio import models
+        from splat_studio.editing import masking
         from splat_studio.hub_outputs import finish_with_outputs
         from splat_studio.reconstruction import errors
         from splat_studio.reconstruction.cost import RunLog, gpu_from_device_name
@@ -1020,6 +1049,7 @@ class _ViewRestyler:
         repo = os.environ["SPLAT_STUDIO_DATASET"]
         api = HfApi()
         prefix = f"previews/{job_id}"
+        object_query = " ".join((object_query or "").split()) or None
         gpu = gpu_from_device_name(torch.cuda.get_device_name(0), self.GPUS[0])
         log = RunLog(job_id=job_id, gpu=gpu)
         # The "running" run.json goes up in the background; it is joined before the final
@@ -1057,6 +1087,23 @@ class _ViewRestyler:
                     image = image.resize(render.size)
                 log.stage("download_input", time.time() - t)
 
+            mask = mask_meta = None
+            if object_query:  # before the edit, so "not found" fails in about a second
+                if self.masker is None:
+                    raise errors.preview_failed(f"{spec.name} cannot limit changes to an object")
+                t = time.time()
+                found = self.masker.detect(image, object_query)
+                log.stage("detect", time.time() - t)
+                if not found:
+                    raise errors.object_not_found(object_query)
+                t = time.time()
+                hard = self.masker.segment(image, found)
+                removal = masking.is_removal(prompt)
+                mask = masking.soft_mask(hard, removal)
+                mask_meta = masking.mask_info(object_query, found, hard, removal,
+                                              self.masker.labels)  # fmt: skip
+                log.stage("segment", time.time() - t)
+
             t = time.time()
             styled = self.editor.restyle(
                 image,
@@ -1068,6 +1115,14 @@ class _ViewRestyler:
                 steps=steps,
             )
             log.stage("restyle", time.time() - t)
+            mask_png = None
+            if mask is not None:
+                t = time.time()
+                styled = masking.composite(image, styled, mask)
+                mask_img = masking.mask_image(mask)
+                files[f"{prefix}/mask.png"] = mask_img
+                mask_png = _png(mask_img)
+                log.stage("composite", time.time() - t)
             files[f"{prefix}/preview.png"] = styled
             self._keep_image(f"{prefix}/preview.png", styled)
 
@@ -1087,6 +1142,8 @@ class _ViewRestyler:
                 "view_prefix": view_prefix,
                 "input_path": input_path,
                 "view_rendered": f"{view_prefix or prefix}/render.png" in files,
+                "object_query": object_query,
+                "mask": mask_meta,
             }
             jpeg = _jpeg(styled)
             started.join()
@@ -1102,6 +1159,8 @@ class _ViewRestyler:
                     api, repo, prefix, log, upload, info, f"Preview {job_id}"
                 )
             result["image_jpeg"] = jpeg
+            if mask_png:
+                result["mask_png"] = mask_png
         except errors.ReconstructionError as e:
             result = log.finish("failed", e.to_dict()).to_dict()
         except Exception as e:
