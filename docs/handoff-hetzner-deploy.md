@@ -14,7 +14,7 @@ What does run on the server, and what it costs:
 |---|---|---|
 | Gradio UI, job polling | `space/app.py`, `space/jobs.py` | Light. 2 vCPU is plenty. |
 | Upload checks (`ffprobe` on the video) | `space/validation.py` | Under a second per upload. |
-| Upload to and download from the HF dataset | `HubStore` in `space/jobs.py` | Network-bound. Videos up to 500 MB. |
+| Upload to and download from the HF dataset | `HubStore` in `space/jobs.py` | Network-bound. Videos up to 1 GB. |
 | Merging a generated object into a scene | `editing/objects.py: merge_files` | **Memory-heavy.** It loads the whole scene PLY into numpy. A real scene was 367 MB, so expect a 1–1.5 GB peak. |
 | Viewer point sampling and the preview camera | `space/viewer.py`, `editing/preview.py` | Moderate. It reads the `.splat` file once per load. |
 
@@ -131,7 +131,7 @@ systemctl reload caddy
 ufw allow OpenSSH && ufw allow 80 && ufw allow 443 && ufw enable
 ```
 
-Caddy gets a Let's Encrypt certificate automatically and proxies websockets and server-sent events, which Gradio needs. It sets no upload size limit, so 500 MB videos pass through. Without a domain, write `:80 { ... }` instead. The password is then sent unencrypted, so only do this for a short test.
+Caddy gets a Let's Encrypt certificate automatically and proxies websockets and server-sent events, which Gradio needs. It sets no upload size limit, so 1 GB videos pass through. Without a domain, write `:80 { ... }` instead. The password is then sent unencrypted, so only do this for a short test.
 
 On Caddy versions older than 2.8, the directive is spelled `basicauth`.
 

@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Upload input media
-The system SHALL accept either one video (MP4/MOV, ≤ 2 min, ≤ 500 MB) or 20 to 300 photos (JPG/PNG) and SHALL reject other inputs with a clear message.
+The system SHALL accept either one video (MP4/MOV, ≤ 2 min, ≤ 1 GB) or 20 to 300 photos (JPG/PNG) and SHALL reject other inputs with a clear message.
 
 #### Scenario: Valid video
 - **WHEN** the user uploads a 45 s MP4

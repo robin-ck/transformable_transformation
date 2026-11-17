@@ -20,4 +20,4 @@ Turn a user's video or photo set into a 3D Gaussian splat scene, view it in a br
 ## Constraints
 - Stay within Modal's free monthly credit for v1: cap job runtime and GPU type per job.
 - Only open-licence models whose licence allows the intended (research) use.
-- Inputs: one video (≤ 2 min, ≤ 500 MB) or 20 to 300 photos.
+- Inputs: one video (≤ 2 min, ≤ 1 GB) or 20 to 300 photos.
