@@ -380,3 +380,46 @@ def test_preview_tool_uses_its_own_negative_prompt(monkeypatch) -> None:
     assert res["status"] == "done", res
     assert editor.kw["negative_prompt"] == "cartoon"
     assert json.loads(REPO["previews/p1/run.json"])["negative_prompt"] == "cartoon"
+
+
+class RewritingEditor:
+    """Like Step1X-Edit: returns an image and keeps its rewritten prompt in last_info."""
+
+    key = "step1x-edit"
+
+    def __init__(self):
+        self.last_info = {}
+
+    def restyle(self, image, depth, prompt, seed, **kw):
+        self.last_info = {"editor_prompt_rewritten": f"Rewritten: {prompt}"}
+        return Image.new("RGB", image.size, (0, 0, 255))
+
+
+@pytest.mark.parametrize("cls_name", ["QwenEditRenderer", "Flux2KleinRenderer",
+                                      "Step1XRenderer"])  # fmt: skip
+def test_new_instruction_editors_mask_and_record_extra_info(monkeypatch, cls_name) -> None:
+    # add-futures-editors: same masking as Kontext; what the editor returns besides the
+    # image (Step1X's rewritten prompt) goes into run.json.
+    import numpy as np
+
+    masker, editor = FakeMasker(), RewritingEditor()
+    w, REPO, COMMITS, _ = _worker(monkeypatch, cls_name, editor, masker)
+    render = type(w).render._get_raw_f()
+    res = render(w, "q1", "scenes/s/v1", CAM, "make the chairs blue", object_query="chairs")
+    assert res["status"] == "done", res
+    run = json.loads(REPO["previews/q1/run.json"])
+    assert run["editor"] == type(w).EDITOR and run["negative_prompt"] is None
+    assert run["editor_prompt_rewritten"].startswith("Rewritten: make the chairs blue")
+    out = np.asarray(Image.open(__import__("io").BytesIO(REPO["previews/q1/preview.png"])))
+    assert (out[0, 0] == [0, 128, 0]).all() and (out[30, 20] == [0, 0, 255]).all()
+
+
+def test_union_editor_restyles_the_whole_view_without_a_mask(monkeypatch) -> None:
+    w, REPO, _, _ = _worker(monkeypatch, "SdxlUnionRenderer")
+    render = type(w).render._get_raw_f()
+    res = render(w, "u1", "scenes/s/v1", CAM, "in 2050", seed=7)
+    assert res["status"] == "done", res
+    run = json.loads(REPO["previews/u1/run.json"])
+    assert run["editor"] == "sdxl-union" and run["mask"] is None
+    bad = render(w, "u2", "scenes/s/v1", CAM, "red chairs", object_query="chairs")
+    assert bad["status"] == "failed"

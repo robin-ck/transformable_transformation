@@ -119,6 +119,53 @@ MASK_SEGMENTER = ModelSpec(
     role="mask of the detected boxes (Segment Anything, box prompts)",
 )
 
+# More futures editors (add-futures-editors), to compare on the same views. Licences
+# and commits read from huggingface.co/api/models on 2026-11-18.
+QWEN_EDIT = ModelSpec(
+    repo_id="Qwen/Qwen-Image-Edit-2511",
+    revision="6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+    licence="apache-2.0",
+    gpu="H100",
+    role="instruction edits (20 B transformer + Qwen2.5-VL encoder, bf16, about 57 GB)",
+)
+QWEN_LIGHTNING = ModelSpec(
+    repo_id="lightx2v/Qwen-Image-Edit-2511-Lightning",
+    revision="107d238d68b8387e32843d0b4a2e24ceb0d3ad86",
+    licence="apache-2.0",
+    gpu="H100",
+    role="4- and 8-step distilled LoRAs for Qwen-Image-Edit-2511",
+)
+FLUX2_KLEIN = ModelSpec(
+    repo_id="black-forest-labs/FLUX.2-klein-4B",
+    revision="e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    licence="apache-2.0",
+    gpu="L4",
+    role="fast instruction edits (4 B, step-distilled, about 13 GB)",
+)
+STEP1X_EDIT = ModelSpec(
+    repo_id="stepfun-ai/Step1X-Edit-v1p2",
+    revision="ca85b97fd19f2235dc0d6fd3633d1319f169e149",
+    licence="apache-2.0",
+    gpu="L40S",
+    role="instruction edits with a thinking step that rewrites the prompt",
+)
+UNION_CONTROLNET = ModelSpec(
+    repo_id="xinsir/controlnet-union-sdxl-1.0",
+    revision="801a4a3fa3d4c936f4feea95b98607bc6726f80c",
+    licence="apache-2.0",
+    gpu="L4",
+    role="keep the layout via depth and edges of the render (one ControlNet, two modes)",
+)
+SDXL_LIGHTNING = ModelSpec(
+    repo_id="ByteDance/SDXL-Lightning",
+    revision="c9a24f48e1c025556787b0c58dd67a091ece2e44",
+    licence="openrail++",
+    gpu="L4",
+    role="4- and 8-step distilled LoRAs for the SDXL base",
+)
+
+RESTYLE, INSTRUCT = "restyle", "instruct"  # EditorSpec.kind
+
 
 @dataclass(frozen=True)
 class EditorSpec:
@@ -138,6 +185,15 @@ class EditorSpec:
     # Detector and segmenter for "Object to change" (add-object-masking); empty: the
     # editor cannot mask. Not part of `label`, so stored model labels stay the same.
     mask_models: tuple[ModelSpec, ...] = ()
+    # RESTYLE: whole view + control image + negative prompt; INSTRUCT: follows an
+    # instruction and keeps the rest (add-futures-editors). Instruction editors can mask.
+    kind: str = RESTYLE
+    short: str = ""  # tile and Compare caption, e.g. "Qwen"; empty: `name`
+
+    @property
+    def tag(self) -> str:
+        """Short editor name for gallery tiles and Compare captions."""
+        return self.short or self.name
 
     @property
     def label(self) -> str:
@@ -153,6 +209,10 @@ class EditorSpec:
         return bool(self.mask_models)
 
     @property
+    def instruct(self) -> bool:
+        return self.kind == INSTRUCT
+
+    @property
     def research_only(self) -> bool:
         return any(m.licence in RESEARCH_ONLY_LICENCES for m in self.models)
 
@@ -166,6 +226,7 @@ EDITORS = {
         modal_class="PreviewRenderer",
         steps=30,
         fast_steps=20,
+        short="SDXL depth",
     ),
     "flux-kontext": EditorSpec(
         key="flux-kontext",
@@ -178,6 +239,55 @@ EDITORS = {
         steps=28,
         fast_steps=20,
         mask_models=(MASK_DETECTOR, MASK_SEGMENTER),
+        kind=INSTRUCT,
+        short="Kontext",
+    ),
+    # add-futures-editors. Step counts are starting values for the trial.
+    "sdxl-union": EditorSpec(
+        key="sdxl-union",
+        name="SDXL + union ControlNet (depth and edges, Lightning)",
+        models=(PREVIEW_BASE, UNION_CONTROLNET, SDXL_LIGHTNING),
+        uses_depth=True,
+        modal_class="SdxlUnionRenderer",
+        steps=8,  # Lightning 8-step LoRA
+        fast_steps=4,  # Lightning 4-step LoRA
+        short="SDXL union",
+    ),
+    "qwen-edit": EditorSpec(
+        key="qwen-edit",
+        name="Qwen-Image-Edit-2511 (instruction edits, Lightning)",
+        models=(QWEN_EDIT, QWEN_LIGHTNING),
+        uses_depth=False,
+        modal_class="QwenEditRenderer",
+        steps=8,
+        fast_steps=4,
+        mask_models=(MASK_DETECTOR, MASK_SEGMENTER),
+        kind=INSTRUCT,
+        short="Qwen",
+    ),
+    "flux2-klein": EditorSpec(
+        key="flux2-klein",
+        name="FLUX.2 klein 4B (fast instruction edits)",
+        models=(FLUX2_KLEIN,),
+        uses_depth=False,
+        modal_class="Flux2KleinRenderer",
+        steps=8,
+        fast_steps=4,  # step-distilled; the card uses 4
+        mask_models=(MASK_DETECTOR, MASK_SEGMENTER),
+        kind=INSTRUCT,
+        short="klein",
+    ),
+    "step1x-edit": EditorSpec(
+        key="step1x-edit",
+        name="Step1X-Edit v1.2 (instruction edits, rewrites the prompt)",
+        models=(STEP1X_EDIT,),
+        uses_depth=False,
+        modal_class="Step1XRenderer",
+        steps=28,
+        fast_steps=20,
+        mask_models=(MASK_DETECTOR, MASK_SEGMENTER),
+        kind=INSTRUCT,
+        short="Step1X",
     ),
 }
 DEFAULT_EDITOR = "sdxl-depth"
@@ -201,4 +311,10 @@ ALL = (
     KONTEXT,
     MASK_DETECTOR,
     MASK_SEGMENTER,
+    QWEN_EDIT,
+    QWEN_LIGHTNING,
+    FLUX2_KLEIN,
+    STEP1X_EDIT,
+    UNION_CONTROLNET,
+    SDXL_LIGHTNING,
 )

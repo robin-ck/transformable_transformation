@@ -53,7 +53,7 @@ def test_editor_label_matches_what_previews_stored():
 
 def test_unknown_editor_is_refused():
     with pytest.raises(KeyError, match="sdxl-depth"):
-        models.editor_spec("qwen-edit")
+        models.editor_spec("hidream-e1")
 
 
 def test_make_editor_builds_without_loading_models():
@@ -122,3 +122,63 @@ def test_only_kontext_masks_with_open_models():
         assert spec in models.ALL and spec.licence in models.ALLOWED_LICENCES
     # Mask models stay out of the editor's label, so old futures' labels still match.
     assert kontext.label == models.KONTEXT.label
+
+
+def test_new_editors_are_open_licence_and_never_default():
+    # add-futures-editors
+    for key in ("sdxl-union", "qwen-edit", "flux2-klein", "step1x-edit"):
+        spec = models.editor_spec(key)
+        assert all(m.licence in models.ALLOWED_LICENCES for m in spec.models), key
+        assert all(m in models.ALL for m in spec.models), key
+        assert not spec.research_only and spec.key != models.DEFAULT_EDITOR
+        assert spec.modal_class.endswith("Renderer") and spec.tag != spec.name
+
+
+def test_kind_decides_masking_and_depth():
+    for spec in models.EDITORS.values():
+        assert spec.kind in (models.RESTYLE, models.INSTRUCT), spec.key
+        # Instruction editors mask and need no depth; restyle editors the other way round.
+        assert spec.can_mask == spec.instruct == (not spec.uses_depth), spec.key
+    assert len({s.modal_class for s in models.EDITORS.values()}) == len(models.EDITORS)
+    assert len({s.tag for s in models.EDITORS.values()}) == len(models.EDITORS)
+
+
+def test_union_editor_label_names_all_three_models():
+    label = models.editor_spec("sdxl-union").label
+    assert label.startswith(models.PREVIEW_BASE.label + " + xinsir/controlnet-union-sdxl-1.0@")
+    assert label.endswith("ByteDance/SDXL-Lightning@c9a24f4")
+
+
+def test_make_editor_for_every_key_without_loading():
+    from splat_studio.editing import restyle
+
+    for key, spec in models.EDITORS.items():
+        editor = restyle.make_editor(key)
+        assert (editor.key, editor.label, editor.pipe) == (key, spec.label, None)
+        assert editor.uses_depth == spec.uses_depth
+
+
+def test_lightning_adapter_and_sizes():
+    from splat_studio.editing import restyle
+
+    assert [restyle.lightning_adapter(s) for s in (2, 4, 5, 8)] == [
+        "4step", "4step", "8step", "8step"]  # fmt: skip
+    for spec in (models.editor_spec("qwen-edit"), models.editor_spec("sdxl-union")):
+        assert restyle.lightning_adapter(spec.fast_steps) == "4step"
+        assert restyle.lightning_adapter(spec.steps) == "8step"
+    assert restyle.multiple_of((1410, 770)) == (1408, 768)
+    assert restyle.multiple_of((8, 8)) == (16, 16)
+
+
+def test_canny_control_is_rgb_edges_of_same_size():
+    pytest.importorskip("cv2")
+    from PIL import Image, ImageDraw
+
+    from splat_studio.editing import restyle
+
+    img = Image.new("RGB", (64, 48), "black")
+    ImageDraw.Draw(img).rectangle((16, 12, 47, 35), fill="white")
+    edges = restyle.canny_control(img)
+    assert edges.size == img.size and edges.mode == "RGB"
+    px = edges.load()
+    assert px[0, 0] == (0, 0, 0) and any(px[16, y] == (255, 255, 255) for y in range(12, 36))
