@@ -20,7 +20,7 @@ The Scene tab SHALL show the viewer and a tool panel side by side on desktop wid
 ## ADDED Requirements
 
 ### Requirement: Tool visibility options
-The Space's Settings dialog (page footer) SHALL offer a "Scene tools" section with one switch per tool sub-tab. A switched-off tool's sub-tab SHALL be hidden; when all are switched off, the tool panel SHALL be hidden and the viewer SHALL use the full width. The choice SHALL be remembered per browser, and all tools SHALL be shown when no choice is stored or the section cannot be added.
+The Space's Settings dialog (page footer) SHALL offer a "Scene tools" section with one switch per tool sub-tab. A switched-off tool's sub-tab SHALL be hidden; when all are switched off, the tool panel SHALL be hidden and the viewer SHALL use the full width. The choice SHALL be saved globally on the server and SHALL apply to every user and browser; all tools SHALL be shown when no choice is saved or the section cannot be added.
 
 #### Scenario: Hide a tool
 - **WHEN** the user switches off Futures in Settings
@@ -38,9 +38,9 @@ The Space's Settings dialog (page footer) SHALL offer a "Scene tools" section wi
 - **WHEN** the user switches a hidden tool back on
 - **THEN** its sub-tab reappears with the state it had before (for example a placement in progress)
 
-#### Scenario: Return visit
-- **WHEN** the user reloads the Space in the same browser
-- **THEN** the same tools are hidden as before
+#### Scenario: Shared for everyone
+- **WHEN** one user hides Futures and another user then opens the Space in a different browser
+- **THEN** Futures is hidden for the second user too, and their Settings show it switched off
 
 #### Scenario: First visit or Settings not available
 - **WHEN** no choice is stored, or the Settings dialog cannot be extended

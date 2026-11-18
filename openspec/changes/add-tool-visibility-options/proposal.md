@@ -7,10 +7,10 @@ The Scene tab's tool panel (History, Objects, Edit scene, Preview, Futures) alwa
 - Gradio's built-in **Settings** dialog (footer of the page) gets a "Scene tools" section with one checkbox per tool sub-tab.
 - An unchecked tool's sub-tab is hidden; if it was open, the first visible tool opens instead.
 - If all tools are unchecked, the whole tool panel is hidden and the viewer uses the full width.
-- The choices are remembered per browser; a first visit shows all tools.
+- The choice is global: saved in the Space's dataset and applied for every user and browser. With nothing saved, all tools are shown.
 
 ## Impact
 - Spec: `space-layout` (MODIFIED "Tools next to the viewer", ADDED "Tool visibility options").
-- Code: `space/app.py` (elem_ids on the tool column and sub-tabs, JavaScript in `BRIDGE_HEAD`).
+- Code: new `src/splat_studio/space/tool_options.py` (load/save the choice), `space/app.py` (elem_ids, a hidden bridge textbox, page-load handler, JavaScript in the page head).
 - Risk: the Settings dialog is Gradio-internal markup with no public API. A Gradio update can break the injection; the fallback is that the section does not appear and all tools stay visible (no loss of function). See `design.md`.
-- No breaking changes, no server state.
+- Any user can change the choice for everyone (the Space has no accounts). No breaking changes.

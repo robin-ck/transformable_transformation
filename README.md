@@ -2,7 +2,7 @@
 
 Upload a video or photos, get a 3D Gaussian splat scene, and change it with text prompts (add objects, edit the scene, 2D concept previews).
 
-Status: early development. See `openspec/` for the project description, specs and proposed changes.
+Status: early development. The tools next to the viewer (History, Objects, Edit scene, Preview, Futures) can be switched on or off for everyone under **Settings** (page footer) → **Scene tools**. See `openspec/` for the project description, specs and proposed changes.
 
 ## Architecture
 
