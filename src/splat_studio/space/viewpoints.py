@@ -1,7 +1,8 @@
 """Saved viewpoints and starter prompts of a scene (add-viewpoint-futures).
 
 Stored in the dataset, one file per scene plus one folder per viewpoint:
-  viewpoints/<scene_id>/setup.json            viewpoints, starters, editor (this module)
+  viewpoints/<scene_id>/setup.json            viewpoints, starters, editor and the
+                                              changed editor instructions (this module)
   viewpoints/<scene_id>/<vp_id>/render.png    plain colour render (written by the worker)
   viewpoints/<scene_id>/<vp_id>/depth.png     depth control image
   viewpoints/<scene_id>/<vp_id>/view.json     camera, size, source version, render time
@@ -67,12 +68,15 @@ class Setup:
     viewpoints: list[Viewpoint] = field(default_factory=list)
     starters: list[Starter] = field(default_factory=list)
     editor: str = models.DEFAULT_EDITOR
+    # Editor instruction texts changed from `editing.instructions.DEFAULTS` (key -> text).
+    instructions: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "viewpoints": [asdict(v) for v in self.ordered()],
             "starters": [asdict(s) for s in self.starters],
             "editor": self.editor,
+            "instructions": dict(self.instructions),
         }
 
     @classmethod
@@ -80,7 +84,8 @@ class Setup:
         vps = [Viewpoint(**{k: v[k] for k in v if k in Viewpoint.__dataclass_fields__})
                for v in d.get("viewpoints", [])]  # fmt: skip
         starters = [Starter(s["id"], s["label"], s["text"]) for s in d.get("starters", [])]
-        return cls(vps, starters, d.get("editor") or models.DEFAULT_EDITOR)
+        return cls(vps, starters, d.get("editor") or models.DEFAULT_EDITOR,
+                   dict(d.get("instructions") or {}))  # fmt: skip
 
     def ordered(self) -> list[Viewpoint]:
         return sorted(self.viewpoints, key=lambda v: (v.order, v.created_at))

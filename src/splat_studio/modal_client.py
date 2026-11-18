@@ -89,15 +89,18 @@ def submit_preview(
     steps: int | None = None,
     object_query: str | None = None,
     area_png: bytes | None = None,
+    instructions: dict | None = None,
 ) -> str:
     """A preview, or a future when `view_prefix` names a viewpoint (add-viewpoint-futures);
     `input_path` (a parent future's preview.png) is restyled instead of the render.
     `class_name` is the editor's Modal class (`models.EditorSpec.modal_class`); `steps`
     None leaves the editor's default. `object_query` limits the change to that object
     (add-object-masking; editors with `can_mask` only); `area_png` limits it to a painted
-    area (add-area-layout; same editors)."""
+    area (add-area-layout; same editors). `instructions` are the scene's editor
+    instruction texts (edit-editor-instructions)."""
     pairs = (("view_prefix", view_prefix), ("input_path", input_path), ("steps", steps),
-             ("object_query", object_query), ("area_png", area_png))  # fmt: skip
+             ("object_query", object_query), ("area_png", area_png),
+             ("instructions", instructions))  # fmt: skip
     kwargs = {k: v for k, v in pairs if v}
     return spawn_method(
         class_name,

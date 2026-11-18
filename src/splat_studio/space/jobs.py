@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from splat_studio import modal_client, models
+from splat_studio.editing import instructions as editor_instructions
 from splat_studio.editing.scene_edit import check_budget
 from splat_studio.reconstruction import errors
 from splat_studio.reconstruction import settings as scene_settings
@@ -361,6 +362,7 @@ class JobManager:
         future: dict | None = None,
         input_path: str | None = None,
         area_png: bytes | None = None,
+        instructions: dict | None = None,
     ) -> Job:
         """Record a preview job (a 2D restyle of one view) and start it on Modal.
 
@@ -369,6 +371,8 @@ class JobManager:
         the viewpoint has none yet. `input_path` (a parent future's image) is restyled
         instead of the render. `area_png` (a future with `area` in its params) is the
         painted area; it goes to the worker, which stores it as area.png.
+        `instructions` (the Preview tool; a future brings its own in `future`) are the
+        scene's editor instruction texts.
         """
         now = self.clock()
         future = future or {}
@@ -379,6 +383,13 @@ class JobManager:
                       "scene_path": scene_path, "camera": camera, "model": spec.label,
                       **future}  # fmt: skip
         kwargs: dict[str, Any] = {}
+        texts = future.get("instructions") or instructions or {}
+        if texts:
+            job.params["instructions"] = texts
+        # Only changed instructions go to the worker, so a worker deployed before
+        # edit-editor-instructions still runs jobs that use the defaults.
+        if editor_instructions.clean(texts):
+            kwargs["instructions"] = texts
         if future:
             kwargs["view_prefix"] = future["view_prefix"]
             if future.get("steps"):

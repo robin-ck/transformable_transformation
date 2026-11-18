@@ -22,7 +22,7 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splat_studio import models  # noqa: E402
-from splat_studio.editing import annotate, area, images, masking  # noqa: E402
+from splat_studio.editing import annotate, area, images, instructions, masking  # noqa: E402
 from splat_studio.editing.objects import Placement  # noqa: E402
 from splat_studio.editing.preview import CameraError, camera_from_viewer  # noqa: E402
 from splat_studio.editing.scene_edit import (  # noqa: E402
@@ -1159,10 +1159,19 @@ SHOW_FUTURE_JS = """(text) => {
 }"""
 
 
-def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
+def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing, negative=None):
     version = _version(scene_id, number)
     if version is None:
         raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    if negative is not None:  # the Preview tool's negative prompt, kept per scene
+        try:
+            custom = instructions.clean({**setup.instructions, "preview_negative": negative})
+        except instructions.InstructionError as e:
+            raise gr.Error(str(e)) from e
+        if custom != setup.instructions:
+            setup.instructions = custom
+            _save_setup(scene_id, setup)
     prompt = (prompt or "").strip()
     if not prompt:
         raise gr.Error("Describe the look first, e.g. 'same street in autumn with rain gardens'.")
@@ -1171,8 +1180,9 @@ def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
     except CameraError as e:
         raise gr.Error(str(e)) from e
     job = PREVIEWS.create_preview(
-        prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
-    )
+        prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength),
+        instructions=instructions.resolve(setup.instructions),
+    )  # fmt: skip
     if job.status == "failed":
         gr.Warning(f"The preview could not start. {job.error['message']}")
         return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
@@ -1447,6 +1457,29 @@ def _starter_choices(setup: viewpoints.Setup) -> list[str]:
     return ["none", *(s.label for s in setup.starters)]
 
 
+def _instruction_texts(custom: dict | None) -> list[str]:
+    """The Futures settings' instruction texts, in `instructions.FUTURE_KEYS` order."""
+    texts = instructions.resolve(custom)
+    return [texts[k] for k in instructions.FUTURE_KEYS]
+
+
+def on_preview_negative(scene_id):
+    """The scene's negative prompt for the Preview tool (the default without a scene)."""
+    custom = _setup(scene_id).instructions if scene_id else None
+    return instructions.resolve(custom)["preview_negative"]
+
+
+def on_sent_preview(scene_id, starter_label, prompt, object_query, area_png):
+    """What the editor will get for the current inputs (the "Sent to the editor" line)."""
+    if not scene_id:
+        return ""
+    setup = _setup(scene_id)
+    starter = next((s for s in setup.starters if s.label == starter_label), None)
+    has_area = area_png is not None and bool(area.from_png(area_png).any())
+    return futures.sent_preview(starter, prompt, setup.editor, object_query, has_area,
+                                setup.instructions)  # fmt: skip
+
+
 def _editor_class(scene_id: str | None) -> str:
     """Modal class of the scene's editor (the default editor without a scene)."""
     key = _setup(scene_id).editor if scene_id else None
@@ -1473,12 +1506,13 @@ def on_futures_open(scene_id: str | None, vp_id: str | None):
     """Fill the Futures sub-tab; the viewer keeps its camera.
 
     Outputs: intro, strip, vp ids, selected vp, name, starter radio, starters text,
-    editor, gallery, tile keys, picked.
+    editor, gallery, tile keys, picked, then one text per editor instruction.
     """
     _warm_up(_editor_class(scene_id))
     if not scene_id:
         empty = [[], [], None, "", gr.update(choices=["none"], value="none"), "", gr.skip()]
-        return ["Pick a finished scene first.", *empty, gr.update(value=[]), [], []]
+        return ["Pick a finished scene first.", *empty, gr.update(value=[]), [], [],
+                *_instruction_texts(None)]  # fmt: skip
     setup = _setup(scene_id)
     if setup.get(vp_id) is None:
         vp_id = _last_used(scene_id, setup)
@@ -1496,6 +1530,7 @@ def on_futures_open(scene_id: str | None, vp_id: str | None):
         gr.update(choices=choices, value="none"),
         viewpoints.starters_text(setup.starters), setup.editor,
         gr.update(value=items, label=label), keys, [],
+        *_instruction_texts(setup.instructions),
     ]  # fmt: skip
 
 
@@ -1698,7 +1733,7 @@ def on_make_future(
         text = futures.compose_prompt(starter, prompt)
         params = futures.future_params(
             vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor,
-            speed, object_query, area_mask=hard,
+            speed, object_query, area_mask=hard, texts=setup.instructions,
         )  # fmt: skip
     except futures.FutureError as e:
         raise gr.Error(str(e)) from e
@@ -1990,23 +2025,28 @@ def on_compare(scene_id, vp_id, picked):
     return out
 
 
-def on_save_future_settings(scene_id, text, editor):
-    """Save the scene's starter directions and editor. Outputs: status, starter radio."""
+def on_save_future_settings(scene_id, text, editor, *texts):
+    """Save the scene's starter directions, editor and editor instructions (`texts`, in
+    `instructions.FUTURE_KEYS` order). Outputs: status, starter radio."""
     if not scene_id:
         raise gr.Error("Pick a finished scene first.")
     setup = _setup(scene_id)
     try:
         setup.starters = viewpoints.parse_starters(text, setup.starters)
         viewpoints.set_editor(setup, editor)
-    except viewpoints.ViewpointError as e:
+        given = dict(zip(instructions.FUTURE_KEYS, texts, strict=True))
+        setup.instructions = instructions.clean({**setup.instructions, **given})
+    except (viewpoints.ViewpointError, instructions.InstructionError) as e:
         raise gr.Error(str(e)) from e
     _save_setup(scene_id, setup)
     _warm_up(_editor_class(scene_id))
     n = len(setup.starters)
     msg = (
         f"Saved {n} starter direction{'s' if n != 1 else ''}; editor "
-        f"{models.editor_spec(setup.editor).name}. Earlier futures keep the text they were "
-        "made with."
+        f"{models.editor_spec(setup.editor).name}; "
+        f"{len(setup.instructions) or 'no'} editor instruction"
+        f"{'s' if len(setup.instructions) != 1 else ''} changed from the defaults. Earlier "
+        "futures keep the text they were made with."
     )
     return msg, gr.update(choices=_starter_choices(setup), value="none")
 
@@ -2413,6 +2453,12 @@ def build() -> gr.Blocks:
                                 pv_strength = gr.Slider(
                                     0.3, 0.95, value=0.7, step=0.05, label="Change (low keeps more)"
                                 )
+                                pv_negative = gr.Textbox(
+                                    value=instructions.DEFAULTS["preview_negative"],
+                                    label=instructions.LABELS["preview_negative"][0],
+                                    info=instructions.LABELS["preview_negative"][1],
+                                    max_length=instructions.MAX_TEXT,
+                                )  # fmt: skip
                                 with gr.Row():
                                     pv_seed = gr.Number(label="Seed", value=0, precision=0)
                                     pv_go = gr.Button("Preview this view")
@@ -2501,6 +2547,7 @@ def build() -> gr.Blocks:
                                         info="Fast: fewer steps, about a third quicker.",
                                     )  # fmt: skip
                                     fu_make = gr.Button("Make future", variant="primary")
+                                fu_sent = gr.Markdown()
                                 fu_status = gr.Markdown()
                                 fu_result = gr.Image(
                                     label="Future (download with the arrow)",
@@ -2544,7 +2591,10 @@ def build() -> gr.Blocks:
                                         fu_cmp_b_det = gr.Image(
                                             interactive=False, height=160, visible=False
                                         )
-                                with gr.Accordion("Settings: starters and editor", open=False):
+                                with gr.Accordion(
+                                    "Settings: starters, editor and editor instructions",
+                                    open=False,
+                                ):
                                     fu_starters = gr.Textbox(
                                         label="Starter directions (one per line, "
                                         '"label: prompt text")', lines=6,
@@ -2556,7 +2606,26 @@ def build() -> gr.Blocks:
                                         'instructions ("remove the chairs", "make the chairs '
                                         'red") and keeps the rest; slower, larger GPU.',
                                     )  # fmt: skip
-                                    fu_settings_save = gr.Button("Save settings")
+                                    gr.Markdown(
+                                        "**Editor instructions.** Fixed text the Space adds "
+                                        "to your prompt before the editor gets it. Change or "
+                                        "empty any of them; the line above **Make future** "
+                                        "shows exactly what will be sent."
+                                    )  # fmt: skip
+                                    fu_instr = [
+                                        gr.Textbox(
+                                            value=instructions.DEFAULTS[k],
+                                            label=instructions.LABELS[k][0],
+                                            info=instructions.LABELS[k][1], lines=2,
+                                            max_length=instructions.MAX_TEXT,
+                                        )
+                                        for k in instructions.FUTURE_KEYS
+                                    ]  # fmt: skip
+                                    with gr.Row():
+                                        fu_settings_save = gr.Button("Save settings")
+                                        fu_instr_reset = gr.Button(
+                                            "Reset instructions to defaults (then save)"
+                                        )
                                 fu_vp, fu_vp_ids, fu_job = (
                                     gr.State(None),
                                     gr.State([]),
@@ -2776,7 +2845,7 @@ def build() -> gr.Blocks:
             pv_go,
             "⏳ Starting…",
             on_preview,
-            [camera_json, picker, pv_prompt, pv_strength, pv_seed, version, placing],
+            [camera_json, picker, pv_prompt, pv_strength, pv_seed, version, placing, pv_negative],
             [pv_status, preview_job],
             js=GET_CAMERA_JS,
         )
@@ -2791,6 +2860,8 @@ def build() -> gr.Blocks:
         # click shows a finished preview or follows a running one.
         preview_job.change(*pv_list)
         pv_tab.select(*pv_list)
+        pv_tab.select(on_preview_negative, picker, pv_negative)
+        picker.input(on_preview_negative, picker, pv_negative)
         pv_table.select(
             on_pick_preview,
             pv_ids,
@@ -2801,14 +2872,17 @@ def build() -> gr.Blocks:
         fu_open = (
             on_futures_open, [picker, fu_vp],
             [fu_intro, fu_strip, fu_vp_ids, fu_vp, fu_name, fu_starter, fu_starters, fu_editor,
-             fu_gallery, fu_keys, fu_picked],
+             fu_gallery, fu_keys, fu_picked, *fu_instr],
         )  # fmt: skip
         area_load = (
             on_area_load, [picker, fu_vp, fu_parent],
             [fu_area, fu_area_on, fu_area_png, fu_area_note],
         )  # fmt: skip
-        fu_tab.select(*fu_open)
-        picker.input(*fu_open)
+        sent = (
+            on_sent_preview, [picker, fu_starter, fu_prompt, fu_object, fu_area_png], fu_sent,
+        )  # fmt: skip
+        fu_tab.select(*fu_open).then(*sent)
+        picker.input(*fu_open).then(*sent)
         fu_strip.select(
             on_pick_viewpoint,
             [picker, version, fu_vp_ids, obj_job, placing],
@@ -2885,8 +2959,11 @@ def build() -> gr.Blocks:
         )  # fmt: skip
         clicked(
             fu_settings_save, "⏳ Saving…", on_save_future_settings,
-            [picker, fu_starters, fu_editor], [fu_status, fu_starter],
-        )  # fmt: skip
+            [picker, fu_starters, fu_editor, *fu_instr], [fu_status, fu_starter],
+        ).then(*sent)  # fmt: skip
+        fu_instr_reset.click(lambda: _instruction_texts(None), None, fu_instr)
+        for comp in (fu_starter, fu_prompt, fu_object, fu_area_png):
+            comp.change(*sent, show_progress="hidden")
 
         # Image editing
         mode_outputs = [im_source, im_aspect, im_strength, im_keep]

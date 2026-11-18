@@ -35,7 +35,7 @@ def test_viewpoints_add_rename_reorder_remove_round_trip(tmp_path) -> None:
     vps.save_setup(store, "s1", setup)
 
     raw = json.loads((tmp_path / "viewpoints/s1/setup.json").read_text())
-    assert set(raw) == {"viewpoints", "starters", "editor"}
+    assert set(raw) == {"viewpoints", "starters", "editor", "instructions"}
     back = vps.load_setup(store, "s1")
     assert [v.name for v in back.ordered()] == ["bridge", "view 3", "east bank, low"]
     assert back.get(bridge.id).camera == cam(0) and back.get(bridge.id).target == [0, 0, 0]

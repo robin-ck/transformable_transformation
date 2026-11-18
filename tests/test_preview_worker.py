@@ -336,3 +336,47 @@ def test_detect_only_labels_the_plain_render_and_stores_nothing(monkeypatch) -> 
     w.masker = None
     res = detect(w, "viewpoints/s/a", "chairs")
     assert res["status"] == "failed" and "cannot limit" in res["error"]["tip"]
+
+
+def test_scene_instructions_reach_the_editor(monkeypatch) -> None:
+    """edit-editor-instructions: the scene's own texts replace the defaults."""
+    import numpy as np
+
+    from splat_studio.editing import area
+
+    class Recorder(CropEditor):
+        def restyle(self, image, depth, prompt, seed, **kw):
+            self.kw = kw
+            return super().restyle(image, depth, prompt, seed, **kw)
+
+    editor = Recorder()
+    w, REPO, _, _ = _worker(monkeypatch, "KontextRenderer", editor, FakeMasker())
+    type(w).render_view._get_raw_f()(w, "scenes/s/v1", CAM, "viewpoints/s/a")
+    render = type(w).render._get_raw_f()
+    hard = np.zeros((64, 64), bool)
+    hard[8:24, 8:24] = True
+    texts = {"area_change": "Put it in the middle.", "negative": "cartoon"}
+    res = render(w, "i1", "scenes/s/v1", CAM, "a willow", view_prefix="viewpoints/s/a",
+                 area_png=area.to_png(hard), instructions=texts)  # fmt: skip
+    assert res["status"] == "done", res
+    assert editor.got[2] == "a willow. Put it in the middle."
+    assert editor.kw["negative_prompt"] == "cartoon"
+    run = json.loads(REPO["previews/i1/run.json"])
+    assert run["instructions"]["area_change"] == "Put it in the middle."
+    assert run["instructions"]["object_change"].startswith("Keep the shape")
+
+
+def test_preview_tool_uses_its_own_negative_prompt(monkeypatch) -> None:
+    class Recorder(FakeEditor):
+        def restyle(self, image, depth, prompt, seed, **kw):
+            self.kw = kw
+            return super().restyle(image, depth, prompt, seed, **kw)
+
+    editor = Recorder()
+    w, REPO, _, _ = _worker(monkeypatch, editor=editor)
+    render = type(w).render._get_raw_f()
+    texts = {"preview_negative": "cartoon", "negative": "other"}
+    res = render(w, "p1", "scenes/s/v1", CAM, "autumn", instructions=texts)
+    assert res["status"] == "done", res
+    assert editor.kw["negative_prompt"] == "cartoon"
+    assert json.loads(REPO["previews/p1/run.json"])["negative_prompt"] == "cartoon"
