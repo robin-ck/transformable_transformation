@@ -107,11 +107,3 @@ def _validate_image(path: str | Path | None, help_text: str) -> Path:
 def validate_object_image(path: str | Path | None) -> Path:
     """Return the reference image for Add object if it is usable, else raise UploadError."""
     return _validate_image(path, OBJECT_IMAGE_HELP)
-
-
-SOURCE_IMAGE_HELP = "Use one PNG, JPG or WebP image, up to 20 MB."
-
-
-def validate_source_image(path: str | Path | None) -> Path:
-    """Return the input image for the Image editing tab if usable, else raise UploadError."""
-    return _validate_image(path, SOURCE_IMAGE_HELP)
