@@ -37,7 +37,13 @@ from splat_studio.editing.scene_edit import (  # noqa: E402
     region_from_viewer,
 )
 from splat_studio.reconstruction import settings as scene_settings  # noqa: E402
-from splat_studio.space import futures, prompt_log, scenes, viewpoints  # noqa: E402
+from splat_studio.space import (  # noqa: E402
+    futures,
+    prompt_log,
+    scenes,
+    tool_options,
+    viewpoints,
+)
 from splat_studio.space.add_object import (  # noqa: E402
     EDIT_COLUMNS,
     OBJECT_COLUMNS,
@@ -775,6 +781,126 @@ window.addEventListener("message", (e) => {
   }).observe(document.documentElement, {childList: true, subtree: true});
 })();
 </script>"""
+
+
+# Scene tool switches in Gradio's own Settings dialog (add-tool-visibility-options). Gradio
+# has no API for that dialog, so its markup is matched here (SEL) and anything missing just
+# leaves all tools shown. The global choice travels as JSON through #tool-options-bridge.
+TOOLS_HEAD = """<script>
+(() => {
+  const TOOLS = __TOOLS__;
+  const SEL = {
+    dialog: ".api-docs .api-docs-wrap", title: ".title",
+    tabs: "#scene-tool-tabs", column: "#scene-tools",
+    bridge: "#tool-options-bridge textarea, #tool-options-bridge input",
+  };
+  const idOf = Object.fromEntries(Object.entries(TOOLS).map(([id, l]) => [l, id]));
+  let hidden = [], seen = null, state = "";
+  const openTool = () => Object.keys(TOOLS).find((id) => {
+    const panel = document.getElementById("tool-" + id);
+    return panel && panel.style.display !== "none";
+  });
+  const apply = () => {
+    const tabs = document.querySelector(SEL.tabs), col = document.querySelector(SEL.column);
+    if (!tabs || !col) return;
+    const off = new Set(hidden);
+    tabs.querySelectorAll(".tab-wrapper button").forEach((b) => {
+      const id = idOf[b.textContent.trim()];
+      if (id) b.classList.toggle("tool-off", off.has(id));
+    });
+    const all = Object.keys(TOOLS).every((id) => off.has(id));
+    col.classList.toggle("tool-off", all);
+    const open = openTool();
+    if (!all && open && off.has(open)) {
+      const first = Object.keys(TOOLS).find((id) => !off.has(id));
+      const btn = [...tabs.querySelectorAll(".tab-wrapper button")].find(
+        (b) => !b.closest("[aria-hidden=true]") && idOf[b.textContent.trim()] === first);
+      if (btn) btn.click();
+    }
+    const now = hidden.join(",");
+    if (now !== state) {  // let Gradio re-measure the tab row and the viewer resize
+      state = now;
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+    }
+  };
+  const save = () => {
+    const box = document.querySelector(SEL.bridge);
+    if (!box) return;
+    box.value = seen = JSON.stringify(hidden);
+    box.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  const inject = () => {
+    const dlg = document.querySelector(SEL.dialog);
+    const title = dlg && dlg.querySelector(SEL.title);
+    if (!title || !/^\\s*Settings/.test(title.textContent)) return;
+    let sec = dlg.querySelector("#scene-tool-options");
+    if (!sec) {
+      sec = document.createElement("div");
+      sec.id = "scene-tool-options"; sec.className = "banner-wrap";
+      sec.style.padding = "var(--size-4, 16px)";
+      const h = document.createElement("h2");
+      h.textContent = "Scene tools";
+      h.style.cssText = "font-weight: 600; margin-bottom: 4px;";
+      const note = document.createElement("p");
+      note.textContent = "Tools shown next to the viewer, for everyone using this Space.";
+      note.style.cssText = "opacity: .75; font-size: .9em; margin-bottom: 6px;";
+      sec.append(h, note);
+      for (const [id, l] of Object.entries(TOOLS)) {
+        const lab = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.dataset.tool = id;
+        cb.addEventListener("change", () => {
+          hidden = [...sec.querySelectorAll("input[data-tool]")]
+            .filter((c) => !c.checked).map((c) => c.dataset.tool);
+          apply(); save();
+        });
+        lab.append(cb, document.createTextNode(l));
+        sec.append(lab);
+      }
+      const after = dlg.children[0];
+      after ? after.after(sec) : dlg.prepend(sec);
+    }
+    sec.querySelectorAll("input[data-tool]").forEach((c) => {
+      c.checked = !hidden.includes(c.dataset.tool);
+    });
+  };
+  const run = () => { try { apply(); inject(); } catch (e) { /* leave all tools shown */ } };
+  let queued = false;
+  new MutationObserver(() => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; run(); });
+  }).observe(document.documentElement, {childList: true, subtree: true});
+  setInterval(() => {  // the saved choice arrives from the server on page load
+    const box = document.querySelector(SEL.bridge);
+    if (!box || box.value === seen) return;
+    seen = box.value;
+    try {
+      const v = JSON.parse(box.value || "[]");
+      hidden = Array.isArray(v) ? v.filter((id) => id in TOOLS) : [];
+    } catch (e) { hidden = []; }
+    run();
+  }, 300);
+})();
+</script>""".replace("__TOOLS__", json.dumps(tool_options.TOOLS))
+HIDDEN_TOOLS: list[list[str]] = []  # cached global choice (one entry once read)
+
+
+def on_tool_options() -> str:
+    """Page load: the global hidden-tools choice as JSON for the page script."""
+    if not HIDDEN_TOOLS:
+        HIDDEN_TOOLS.append(tool_options.load(STORE))
+    return json.dumps(HIDDEN_TOOLS[0])
+
+
+def on_save_tool_options(text: str | None) -> None:
+    """Save the hidden tools the page script sent; other pages get them on their next load."""
+    try:
+        hidden = tool_options.save(STORE, tool_options.parse(text))
+    except Exception as e:  # keep the page usable; the choice applies to this page only
+        gr.Warning(f"Could not save the scene tool settings: {e}")
+        return
+    HIDDEN_TOOLS[:] = [hidden]
 
 
 def on_bridge(text: str | None):
@@ -2231,7 +2357,8 @@ button { transition: transform 60ms ease, filter 60ms ease; }
 button:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.9); }
 button:disabled { cursor: progress !important; }
 #placement-bridge, #camera-bridge, #futures-camera-bridge,
-#futures-overlay-bridge, #futures-delete-bridge { display: none !important; }
+#futures-overlay-bridge, #futures-delete-bridge,
+#tool-options-bridge { display: none !important; }
 #futures-gallery .gallery-item { position: relative; }
 #futures-gallery .future-trash { position: absolute; top: 8px; right: 8px; z-index: 5;
   width: 30px; height: 30px; padding: 0; border-radius: 6px; display: flex;
@@ -2242,11 +2369,15 @@ button:disabled { cursor: progress !important; }
 #history-table tbody tr, #objects-table tbody tr, #edits-table tbody tr,
 #previews-table tbody tr { cursor: pointer; }
 #objects-table td:last-child, #edits-table td:last-child { font-weight: 600; white-space: nowrap; }
+.tool-off { display: none !important; }
+#scene-tool-options label { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+#scene-tool-options input[type="checkbox"] { appearance: auto !important; width: 16px;
+  height: 16px; margin: 0; accent-color: var(--color-accent, #f97316); }
 """
 
 
 def build() -> gr.Blocks:
-    with gr.Blocks(title="Splat Studio", css=CSS, head=BRIDGE_HEAD) as demo:
+    with gr.Blocks(title="Splat Studio", css=CSS, head=BRIDGE_HEAD + TOOLS_HEAD) as demo:
         gr.Markdown("# Splat Studio\nTurn a video or photo set into a 3D Gaussian splat scene.")
         if not DATASET:
             gr.Markdown("⚠️ `SPLAT_STUDIO_DATASET` is not set: jobs are stored locally only.")
@@ -2258,6 +2389,8 @@ def build() -> gr.Blocks:
         image_paths = gr.State([])
         n_photos = gr.State(None)  # photos in the current upload; None for a video
 
+        # Global scene tool choice for the page script; outside the tabs so it always exists.
+        tools_json = gr.Textbox(elem_id="tool-options-bridge", show_label=False, container=False)
         with gr.Tabs(selected="new") as tabs:
             # --- New scene: upload, create, jobs -----------------------------------
             with gr.Tab("New scene", id="new"):
@@ -2338,9 +2471,9 @@ def build() -> gr.Blocks:
                             get_ply = gr.Button("Download .ply")
                             get_splat = gr.Button("Download .splat (compressed)")
                         download = gr.File(label="Download", visible=False, interactive=False)
-                    with gr.Column(scale=2):
-                        with gr.Tabs():
-                            with gr.Tab("History"):
+                    with gr.Column(scale=2, elem_id="scene-tools"):
+                        with gr.Tabs(elem_id="scene-tool-tabs"):
+                            with gr.Tab("History", elem_id="tool-history"):
                                 history_table = gr.Dataframe(
                                     headers=HISTORY_COLUMNS, interactive=False, wrap=True,
                                     type="array", elem_id="history-table",
@@ -2351,7 +2484,7 @@ def build() -> gr.Blocks:
                                     log_table = gr.Dataframe(
                                         headers=prompt_log.COLUMNS, interactive=False, wrap=True
                                     )
-                            with gr.Tab("Objects"):
+                            with gr.Tab("Objects", elem_id="tool-objects"):
                                 objects_table = gr.Dataframe(
                                     headers=OBJECT_COLUMNS, interactive=False, wrap=True,
                                     type="array", elem_id="objects-table",
@@ -2392,7 +2525,7 @@ def build() -> gr.Blocks:
                                             "Save as new version", variant="primary"
                                         )
                                         place_cancel = gr.Button("Cancel")
-                            with gr.Tab("Edit scene"):
+                            with gr.Tab("Edit scene", elem_id="tool-edit"):
                                 edits_table = gr.Dataframe(
                                     headers=EDIT_COLUMNS, interactive=False, wrap=True,
                                     type="array", elem_id="edits-table",
@@ -2441,7 +2574,7 @@ def build() -> gr.Blocks:
                                     ed_seed = gr.Number(label="Seed", value=0, precision=0)
                                     ed_go = gr.Button("Edit scene", variant="primary")
                                 ed_status = gr.Markdown()
-                            with gr.Tab("Preview") as pv_tab:
+                            with gr.Tab("Preview", elem_id="tool-preview") as pv_tab:
                                 gr.Markdown(
                                     "Restyle the current view as a 2D image. Aim the camera "
                                     "first; the scene is not changed."
@@ -2477,7 +2610,7 @@ def build() -> gr.Blocks:
                                     label="Earlier previews of this scene (click one to show it)",
                                 )  # fmt: skip
                                 pv_ids = gr.State([])
-                            with gr.Tab("Futures") as fu_tab:
+                            with gr.Tab("Futures", elem_id="tool-futures") as fu_tab:
                                 fu_intro = gr.Markdown(FUTURE_HINT)
                                 fu_strip = gr.Gallery(
                                     label="Saved views (click one to go there)",
@@ -2731,6 +2864,10 @@ def build() -> gr.Blocks:
         clicked(refresh, "⏳ Refreshing…", refresh_all, picker, [table, picker])
 
         # Start tab, finished-job notice, opening scenes and versions
+        demo.load(on_tool_options, None, tools_json, queue=False, show_progress="hidden")
+        tools_json.input(
+            on_save_tool_options, tools_json, None, queue=False, show_progress="hidden"
+        )
         demo.load(on_load, [obj_job, placing], [tabs, table, picker, seen, *scene_outputs]).then(
             *pv_list
         ).then(*log).then(*lib).then(*details)
