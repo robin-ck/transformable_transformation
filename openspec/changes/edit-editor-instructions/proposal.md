@@ -5,6 +5,8 @@ A future's prompt is not sent to the editor as typed. The Space and the worker a
 
 ## What changes
 - **Editor instructions:** the five fixed texts (`negative`, `object_change`, `object_removal`, `area_change`, `area_removal`) move to one module, `editing/instructions.py`, with today's texts as defaults. `{target}` stands for the named object.
+- **Rules as word lists:** which words make a prompt a removal (`removal_words`) and which words are replaced by the named object (`pronouns`, "make it green" -> "make the chair green") become editable comma-separated lists; an empty list turns the rule off.
+- **Preview tool:** its negative prompt (`preview_negative`) gets its own box in the Preview sub-tab, kept per scene when the user clicks Preview this view.
 - **Per scene:** Settings in the Futures sub-tab shows each text with when it is used; the user can change or empty it, save, or reset to the defaults. `setup.json` stores only the changed texts.
 - **Visible before Make:** a line above Make future shows exactly what the editor will get for the current starter, prompt, object and area (and SDXL's negative prompt), updated as the user types.
 - **Recorded:** each future stores the full set of texts in its params; run.json gains `instructions` and `negative_prompt`; the future's details show the negative prompt.
@@ -13,5 +15,4 @@ A future's prompt is not sent to the editor as typed. The Space and the worker a
 ## Impact
 - Specs: `viewpoint-futures` gains "Editor instructions".
 - Files: new `editing/instructions.py`; `editing/masking.py`, `editing/area.py`, `editing/restyle.py` (take the texts); `modal_app/app.py` (`render(instructions=)`); `space/viewpoints.py`, `space/futures.py`, `space/jobs.py`, `modal_client.py`, `space/app.py`; tests.
-- Not in this change: the removal-verb rule (which words count as a removal), the it/them replacement, and the Preview tool's negative prompt stay fixed.
 - Deploy: changed texts need `modal deploy modal_app/app.py`.

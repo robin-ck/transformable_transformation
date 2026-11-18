@@ -1159,10 +1159,19 @@ SHOW_FUTURE_JS = """(text) => {
 }"""
 
 
-def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
+def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing, negative=None):
     version = _version(scene_id, number)
     if version is None:
         raise gr.Error("Pick a finished scene first.")
+    setup = _setup(scene_id)
+    if negative is not None:  # the Preview tool's negative prompt, kept per scene
+        try:
+            custom = instructions.clean({**setup.instructions, "preview_negative": negative})
+        except instructions.InstructionError as e:
+            raise gr.Error(str(e)) from e
+        if custom != setup.instructions:
+            setup.instructions = custom
+            _save_setup(scene_id, setup)
     prompt = (prompt or "").strip()
     if not prompt:
         raise gr.Error("Describe the look first, e.g. 'same street in autumn with rain gardens'.")
@@ -1171,8 +1180,9 @@ def on_preview(camera_json, scene_id, prompt, strength, seed, number, placing):
     except CameraError as e:
         raise gr.Error(str(e)) from e
     job = PREVIEWS.create_preview(
-        prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength)
-    )
+        prompt, version.path, camera.to_dict(), seed=int(seed or 0), strength=float(strength),
+        instructions=instructions.resolve(setup.instructions),
+    )  # fmt: skip
     if job.status == "failed":
         gr.Warning(f"The preview could not start. {job.error['message']}")
         return f"**Could not start.** {job.error['message']} {job.error.get('tip', '')}", None
@@ -1448,9 +1458,15 @@ def _starter_choices(setup: viewpoints.Setup) -> list[str]:
 
 
 def _instruction_texts(custom: dict | None) -> list[str]:
-    """The editor instruction texts in `instructions.DEFAULTS` order (scene's own first)."""
+    """The Futures settings' instruction texts, in `instructions.FUTURE_KEYS` order."""
     texts = instructions.resolve(custom)
-    return [texts[k] for k in instructions.DEFAULTS]
+    return [texts[k] for k in instructions.FUTURE_KEYS]
+
+
+def on_preview_negative(scene_id):
+    """The scene's negative prompt for the Preview tool (the default without a scene)."""
+    custom = _setup(scene_id).instructions if scene_id else None
+    return instructions.resolve(custom)["preview_negative"]
 
 
 def on_sent_preview(scene_id, starter_label, prompt, object_query, area_png):
@@ -2011,15 +2027,15 @@ def on_compare(scene_id, vp_id, picked):
 
 def on_save_future_settings(scene_id, text, editor, *texts):
     """Save the scene's starter directions, editor and editor instructions (`texts`, in
-    `instructions.DEFAULTS` order). Outputs: status, starter radio."""
+    `instructions.FUTURE_KEYS` order). Outputs: status, starter radio."""
     if not scene_id:
         raise gr.Error("Pick a finished scene first.")
     setup = _setup(scene_id)
     try:
         setup.starters = viewpoints.parse_starters(text, setup.starters)
         viewpoints.set_editor(setup, editor)
-        setup.instructions = instructions.clean(dict(zip(instructions.DEFAULTS, texts,
-                                                         strict=True)))  # fmt: skip
+        given = dict(zip(instructions.FUTURE_KEYS, texts, strict=True))
+        setup.instructions = instructions.clean({**setup.instructions, **given})
     except (viewpoints.ViewpointError, instructions.InstructionError) as e:
         raise gr.Error(str(e)) from e
     _save_setup(scene_id, setup)
@@ -2437,6 +2453,12 @@ def build() -> gr.Blocks:
                                 pv_strength = gr.Slider(
                                     0.3, 0.95, value=0.7, step=0.05, label="Change (low keeps more)"
                                 )
+                                pv_negative = gr.Textbox(
+                                    value=instructions.DEFAULTS["preview_negative"],
+                                    label=instructions.LABELS["preview_negative"][0],
+                                    info=instructions.LABELS["preview_negative"][1],
+                                    max_length=instructions.MAX_TEXT,
+                                )  # fmt: skip
                                 with gr.Row():
                                     pv_seed = gr.Number(label="Seed", value=0, precision=0)
                                     pv_go = gr.Button("Preview this view")
@@ -2597,7 +2619,7 @@ def build() -> gr.Blocks:
                                             info=instructions.LABELS[k][1], lines=2,
                                             max_length=instructions.MAX_TEXT,
                                         )
-                                        for k in instructions.DEFAULTS
+                                        for k in instructions.FUTURE_KEYS
                                     ]  # fmt: skip
                                     with gr.Row():
                                         fu_settings_save = gr.Button("Save settings")
@@ -2823,7 +2845,7 @@ def build() -> gr.Blocks:
             pv_go,
             "⏳ Starting…",
             on_preview,
-            [camera_json, picker, pv_prompt, pv_strength, pv_seed, version, placing],
+            [camera_json, picker, pv_prompt, pv_strength, pv_seed, version, placing, pv_negative],
             [pv_status, preview_job],
             js=GET_CAMERA_JS,
         )
@@ -2838,6 +2860,8 @@ def build() -> gr.Blocks:
         # click shows a finished preview or follows a running one.
         preview_job.change(*pv_list)
         pv_tab.select(*pv_list)
+        pv_tab.select(on_preview_negative, picker, pv_negative)
+        picker.input(on_preview_negative, picker, pv_negative)
         pv_table.select(
             on_pick_preview,
             pv_ids,

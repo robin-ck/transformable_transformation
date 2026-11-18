@@ -364,3 +364,19 @@ def test_scene_instructions_reach_the_editor(monkeypatch) -> None:
     run = json.loads(REPO["previews/i1/run.json"])
     assert run["instructions"]["area_change"] == "Put it in the middle."
     assert run["instructions"]["object_change"].startswith("Keep the shape")
+
+
+def test_preview_tool_uses_its_own_negative_prompt(monkeypatch) -> None:
+    class Recorder(FakeEditor):
+        def restyle(self, image, depth, prompt, seed, **kw):
+            self.kw = kw
+            return super().restyle(image, depth, prompt, seed, **kw)
+
+    editor = Recorder()
+    w, REPO, _, _ = _worker(monkeypatch, editor=editor)
+    render = type(w).render._get_raw_f()
+    texts = {"preview_negative": "cartoon", "negative": "other"}
+    res = render(w, "p1", "scenes/s/v1", CAM, "autumn", instructions=texts)
+    assert res["status"] == "done", res
+    assert editor.kw["negative_prompt"] == "cartoon"
+    assert json.loads(REPO["previews/p1/run.json"])["negative_prompt"] == "cartoon"

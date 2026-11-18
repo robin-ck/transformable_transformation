@@ -56,3 +56,26 @@ def test_sent_preview_shows_what_the_editor_gets():
     md = futures.sent_preview(None, "a willow", "flux-kontext", has_area=True)
     assert "Make the change in the middle" in md
     assert "Type what should change" in futures.sent_preview(None, "", "sdxl-depth")
+
+
+def test_removal_words_and_pronouns_can_be_changed_or_turned_off():
+    assert masking.is_removal("take   away the fence")  # default list, any spacing
+    texts = {"removal_words": "Remove, weg", "pronouns": "it, this one"}
+    assert masking.is_removal("bench weg", texts) and not masking.is_removal("delete it", texts)
+    assert not masking.is_removal("remove the bench", {"removal_words": ""})
+    assert masking.object_prompt("paint this one red", "bench", texts).startswith(
+        "paint the bench red."
+    )
+    p = masking.object_prompt("make it red", "bench", {"pronouns": ""})
+    assert p.startswith("make it red (the bench).")
+    assert "Fill the space in the middle" in area.area_prompt("bench weg", texts)
+    assert instructions.clean({"pronouns": " It ,, THEM , this  one"}) == {
+        "pronouns": "it, them, this one"
+    }
+
+
+def test_preview_negative_is_kept_apart_from_the_futures_one():
+    assert "preview_negative" not in instructions.FUTURE_KEYS
+    texts = instructions.resolve({"preview_negative": "cartoon"})
+    assert texts["negative"] == instructions.DEFAULTS["negative"]
+    assert texts["preview_negative"] == "cartoon"

@@ -140,7 +140,7 @@ def area_prompt(prompt: str, texts: dict | None = None) -> str:
     from .instructions import tail
 
     text = " ".join((prompt or "").split()).rstrip(" .") or "Change this place"
-    extra = tail(texts, "area_removal" if masking.is_removal(prompt) else "area_change")
+    extra = tail(texts, "area_removal" if masking.is_removal(prompt, texts) else "area_change")
     return f"{text}. {extra}" if extra else f"{text}."
 
 

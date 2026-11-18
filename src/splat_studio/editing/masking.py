@@ -26,8 +26,6 @@ GROW = 0.015  # mask grows by this fraction of the image's longer side (21 px at
 GROW_REMOVAL = 0.04  # removals: room for the painted background and the shadow (56 px)
 DIM = 0.35  # brightness of the unchanged part in the "Changed area" image
 
-_REMOVAL = re.compile(r"\b(remove|delete|erase|take away|get rid of|without)\b", re.IGNORECASE)
-
 
 class MaskError(ValueError):
     """An object query that cannot be used; the message says why."""
@@ -54,10 +52,14 @@ def detector_text(query: str) -> str:
     return " ".join(f"{p}." for p in object_phrases(query))
 
 
-def is_removal(prompt: str) -> bool:
+def is_removal(prompt: str, texts: dict | None = None) -> bool:
     """True when the prompt removes something; its mask then gets a wider margin.
-    Reads only the verb, never which object is meant."""
-    return bool(_REMOVAL.search(prompt or ""))
+    Reads only the verb, never which object is meant. The words are `instructions`
+    "removal_words" from `texts` (None: the defaults)."""
+    from .instructions import word_pattern
+
+    pattern = word_pattern(texts, "removal_words")
+    return bool(pattern and pattern.search(prompt or ""))
 
 
 def mask_sizes(size: tuple[int, int], removal: bool) -> tuple[int, int]:
@@ -151,28 +153,28 @@ def keep_detections(
     return out[:MAX_DETECTIONS]
 
 
-_PRONOUN = re.compile(r"\b(it|them)\b", re.IGNORECASE)  # "make it green"
-
-
 def object_prompt(prompt: str, query: str, texts: dict | None = None) -> str:
     """The instruction Kontext gets when the user named the object to change.
 
     Kontext cannot see the mask, so a bare "make it green" leaves it guessing what "it" is
-    (it painted chairs flat green, 2026-11-17). "it"/"them" become the named object, and
+    (it painted chairs flat green, 2026-11-17). "it"/"them" (`instructions` "pronouns")
+    become the named object, and
     the instruction says what to keep (`instructions` "object_change"; for a removal
     "object_removal", what is behind it). `texts` are the scene's own instruction texts
     (None: the defaults). The result is still used as Kontext proposes it, inside the
     mask only.
     """
-    from .instructions import tail
+    from .instructions import tail, word_pattern
 
     nouns = [re.sub(r"^(the|a|an)\s+", "", p) for p in object_phrases(query)]
     target = "the " + " and the ".join(nouns)
     text = " ".join((prompt or "").split()).rstrip(" .")
-    text = _PRONOUN.sub(target, text)
+    pronouns = word_pattern(texts, "pronouns")  # "make it green"
+    if pronouns:
+        text = pronouns.sub(target, text)
     if not any(n in text.lower() for n in nouns):
         text = f"{text} ({target})" if text else f"Change {target}"
-    key = "object_removal" if is_removal(prompt) else "object_change"
+    key = "object_removal" if is_removal(prompt, texts) else "object_change"
     extra = tail(texts, key, target)
     return f"{text}. {extra}" if extra else f"{text}."
 

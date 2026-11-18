@@ -1146,6 +1146,7 @@ class _ViewRestyler:
                     image = image.resize(render.size)
                 log.stage("download_input", time.time() - t)
 
+            texts = instr.resolve(instructions)
             mask = mask_meta = detections_jpeg = None
             if object_query:  # before the edit, so "not found" fails in about a second
                 if self.masker is None:
@@ -1158,7 +1159,7 @@ class _ViewRestyler:
                 t = time.time()
                 masks = self.masker.segment(image, found)  # one per detection
                 hard = masks.any(0)
-                removal = masking.is_removal(prompt)
+                removal = masking.is_removal(prompt, texts)
                 mask = masking.soft_mask(hard, removal)
                 mask_meta = masking.mask_info(object_query, found, hard, removal,
                                               self.masker.labels)  # fmt: skip
@@ -1180,7 +1181,7 @@ class _ViewRestyler:
                     hard = area.check(area.from_png(area_png, image.size))
                 except area.AreaError as e:
                     raise errors.area_empty() from e
-                removal = masking.is_removal(prompt)
+                removal = masking.is_removal(prompt, texts)
                 mask = masking.soft_mask(hard, removal)
                 box = area.crop_box(hard)
                 area_meta = area.area_info(hard, box, removal)
@@ -1191,7 +1192,6 @@ class _ViewRestyler:
             # with a drawn area, one that puts the change in the middle of the crop
             # (area.area_prompt); both add the scene's instruction texts. `prompt` stays
             # what the user wrote and is what info records as "prompt".
-            texts = instr.resolve(instructions)
             if box is not None:
                 editor_prompt = area.area_prompt(prompt, texts)
             elif mask is not None:
@@ -1199,6 +1199,8 @@ class _ViewRestyler:
             else:
                 editor_prompt = prompt
 
+            # The Preview tool (no viewpoint) has its own negative prompt.
+            negative = texts["negative" if view_prefix else "preview_negative"]
             t = time.time()
             styled = self.editor.restyle(
                 image.crop(box) if box else image,
@@ -1208,7 +1210,7 @@ class _ViewRestyler:
                 strength=strength,
                 control_scale=control_scale,
                 steps=steps,
-                negative_prompt=texts["negative"],
+                negative_prompt=negative,
             )
             if box is not None:
                 styled = area.paste(image, styled, box)
@@ -1231,7 +1233,7 @@ class _ViewRestyler:
                 "editor": spec.key,
                 "prompt": prompt,
                 "editor_prompt": editor_prompt,
-                "negative_prompt": texts["negative"] if spec.key == "sdxl-depth" else None,
+                "negative_prompt": negative if spec.key == "sdxl-depth" else None,
                 "instructions": texts,
                 "seed": seed,
                 "strength": strength,
