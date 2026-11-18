@@ -131,21 +131,17 @@ def paste(start: Any, edited_crop: Any, box: tuple[int, int, int, int]) -> Any:
     return out
 
 
-def area_prompt(prompt: str) -> str:
+def area_prompt(prompt: str, texts: dict | None = None) -> str:
     """The instruction Kontext gets for the crop: the change sits in the middle of it.
 
     Kontext cannot see the drawn area, but the crop puts it in the middle; the result is
-    kept inside the area only."""
+    kept inside the area only. The added text is `instructions` "area_change" (removals:
+    "area_removal") from `texts`, the scene's own texts (None: the defaults)."""
+    from .instructions import tail
+
     text = " ".join((prompt or "").split()).rstrip(" .") or "Change this place"
-    if masking.is_removal(prompt):
-        tail = ("Fill the space in the middle of the image with what is behind it, "
-                "matching the surroundings and the lighting. Keep everything else "
-                "unchanged.")  # fmt: skip
-    else:
-        tail = ("Make the change in the middle of the image, matching the perspective, "
-                "scale, lighting and style of the scene. Keep everything else "
-                "unchanged.")  # fmt: skip
-    return f"{text}. {tail}"
+    extra = tail(texts, "area_removal" if masking.is_removal(prompt) else "area_change")
+    return f"{text}. {extra}" if extra else f"{text}."
 
 
 def area_info(hard: np.ndarray, box: tuple[int, int, int, int], removal: bool) -> dict:

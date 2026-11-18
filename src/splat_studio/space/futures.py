@@ -13,6 +13,8 @@ A future is a preview job (`previews/<job_id>/`, see `jobs.py`) whose `params` a
               user painted; only that area may change. The mask itself is area.png,
               written by the worker; run.json's `area` holds the crop. Absent when
               none was drawn.
+  instructions  the full set of editor instruction texts (`editing.instructions`) the
+              scene had when the future was made; the worker adds them to the prompt.
 Old previews have no `viewpoint` and are not futures. Pure logic, no GPU.
 """
 
@@ -24,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from splat_studio import models
-from splat_studio.editing import annotate, area, masking
+from splat_studio.editing import annotate, area, instructions, masking
 
 from .jobs import FINAL, Job, JobManager
 from .viewpoints import Starter, Viewpoint
@@ -76,11 +78,13 @@ def future_params(
     speed: str | None = None,
     object_query: str | None = None,
     area_mask=None,
+    texts: dict | None = None,
 ) -> dict:
     """The future-specific fields of the preview job's `params` (see the module doc).
 
     `area_mask` (bool array, the painted "Area to change") limits the change to that area;
-    it cannot be combined with `object_query`."""
+    it cannot be combined with `object_query`. `texts` are the scene's changed editor
+    instructions (`Setup.instructions`); the future stores the full set."""
     spec = models.editor_spec(editor)
     if parent is not None and parent.params.get("viewpoint") != vp.id:
         raise FutureError("A future can only be built on a future of the same viewpoint.")
@@ -120,8 +124,37 @@ def future_params(
         "model": spec.label,
         "speed": speed or DEFAULT_SPEED,
         "steps": steps_for(spec.key, speed),
+        "instructions": instructions.resolve(texts),
         **extra,
     }
+
+
+def sent_preview(
+    starter: Starter | None,
+    own: str | None,
+    editor: str | None,
+    object_query: str | None = None,
+    has_area: bool = False,
+    texts: dict | None = None,
+) -> str:
+    """Markdown of exactly what the editor will get for these inputs (the prompt with the
+    scene's instructions added, and SDXL's negative prompt), shown under the prompt."""
+    spec = models.editor_spec(editor)
+    try:
+        prompt = compose_prompt(starter, own)
+    except FutureError:
+        return "*Type what should change to see what the editor gets.*"
+    texts = instructions.resolve(texts)
+    if not spec.can_mask:
+        object_query, has_area = None, False
+    try:
+        sent = instructions.editor_prompt(prompt, object_query, has_area, texts)
+    except masking.MaskError as e:
+        return f"*{e}*"
+    lines = [f"**Sent to {spec.name}:** {sent}"]
+    if spec.key == "sdxl-depth":
+        lines.append(f"**Negative prompt:** {texts['negative'] or '(none)'}")
+    return "  \n".join(lines)
 
 
 def detect_query(editor: str | None, object_query: str | None) -> str:
@@ -226,6 +259,8 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
     sent = job.run.get("editor_prompt")
     if sent and sent != job.run.get("prompt"):
         lines.append(f"**Sent to the editor:** {sent}")
+    if job.run.get("negative_prompt"):
+        lines.append(f"**Negative prompt:** {job.run['negative_prompt']}")
     model = job.run.get("model") or p.get("model")
     steps = f" · {p['steps']} steps" if p.get("steps") else ""
     lines.append(f"**Editor:** {model}{steps} · seed {p.get('seed', 0)} · job `{job.job_id}`")

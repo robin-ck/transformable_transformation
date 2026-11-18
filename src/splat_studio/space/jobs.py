@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from splat_studio import modal_client, models
+from splat_studio.editing import instructions
 from splat_studio.editing.scene_edit import check_budget
 from splat_studio.reconstruction import errors
 from splat_studio.reconstruction import settings as scene_settings
@@ -387,6 +388,10 @@ class JobManager:
                 kwargs["object_query"] = future["object_query"]
             if future.get("area") and area_png:
                 kwargs["area_png"] = area_png
+            # Only changed instructions go to the worker, so a worker deployed before
+            # edit-editor-instructions still runs futures that use the defaults.
+            if instructions.clean(future.get("instructions") or {}):
+                kwargs["instructions"] = future["instructions"]
             if spec.modal_class != "PreviewRenderer":
                 kwargs["class_name"] = spec.modal_class
         if input_path:

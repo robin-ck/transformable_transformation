@@ -14,8 +14,9 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from splat_studio import models
+from splat_studio.editing.instructions import DEFAULTS
 
-NEGATIVE_PROMPT = "blurry, low quality, distorted, deformed, oversaturated, text, watermark"
+NEGATIVE_PROMPT = DEFAULTS["negative"]  # a future may bring its own (`negative_prompt`)
 
 
 class Editor(Protocol):
@@ -69,8 +70,10 @@ class SdxlDepthEditor:
         strength: float = 0.7,
         control_scale: float = 0.6,
         steps: int = 30,
+        negative_prompt: str | None = None,
     ) -> Any:
-        """`image` and `depth` are PIL images of the same size; returns a PIL image."""
+        """`image` and `depth` are PIL images of the same size; returns a PIL image.
+        `negative_prompt` None uses `NEGATIVE_PROMPT`; "" uses none."""
         import torch
 
         if self.pipe is None:
@@ -78,7 +81,7 @@ class SdxlDepthEditor:
         width, height = image.size
         return self.pipe(
             prompt=prompt.strip(),
-            negative_prompt=NEGATIVE_PROMPT,
+            negative_prompt=NEGATIVE_PROMPT if negative_prompt is None else negative_prompt,
             image=image,
             control_image=depth,
             strength=float(strength),
@@ -124,8 +127,9 @@ class FluxKontextEditor:
     """FLUX.1 Kontext dev: edits the image as the prompt instructs and keeps the rest.
 
     Unlike SDXL img2img it needs no strength: an instruction such as "remove the chairs"
-    changes the chairs only. The depth image is not used; `strength` and `control_scale`
-    are accepted and ignored, so callers can pass the same options to every editor.
+    changes the chairs only. The depth image is not used; `strength`, `control_scale`
+    and `negative_prompt` are accepted and ignored, so callers can pass the same options
+    to every editor.
     """
 
     def __init__(self, spec: models.EditorSpec) -> None:
