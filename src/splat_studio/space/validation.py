@@ -10,7 +10,7 @@ from splat_studio.reconstruction import frames
 from splat_studio.reconstruction.pipeline import PHOTO_EXT, VIDEO_EXT
 
 MAX_VIDEO_SECONDS = 300
-MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # a 5-min 4K phone clip is ~1.75-2.25 GB; 1080p is far smaller
+MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # a 5-min 4K phone clip is ~1.75-2.25 GB
 MIN_PHOTOS = 20
 MAX_PHOTOS = 300
 
