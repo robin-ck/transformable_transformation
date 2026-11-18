@@ -1412,8 +1412,9 @@ FUTURE_HINT = (
 AREA_COLOUR = "#ff3b30"
 AREA_HINT = (
     "Paint where something new should go or what should change (a willow here, a wetland "
-    "on this meadow). Kontext edits a crop around the area and only the area changes. "
-    "Leave it empty to change the whole view; not together with 'Object to change'."
+    "on this meadow). The editor edits a crop around the area and only the area changes. "
+    "Leave it empty to change the whole view; not together with 'Object to change'. "
+    "Instruction editors only."
 )
 
 
@@ -1558,7 +1559,7 @@ def _gallery(scene_id: str | None, vp_id: str | None):
     for job in futures.viewpoint_futures(FUTURES.jobs(), vp.id):
         thumb = _future_thumb(job)
         if thumb:
-            items.append((str(thumb), futures.caption(job)))
+            items.append((str(thumb), f"{futures.editor_tag(job)} · {futures.caption(job, 40)}"))
             keys.append(job.job_id)
     n = len(keys) - 1
     return items, keys, f'Futures of "{vp.name}" ({n}; click to show, pick two to compare)'
@@ -1810,7 +1811,7 @@ def on_area_change(value, area_on):
     hard = area.from_layers(layers, size)
     if not hard.any():
         return None, AREA_HINT
-    note = f"Area: {hard.mean():.0%} of the view. Only it changes (FLUX.1 Kontext editor)."
+    note = f"Area: {hard.mean():.0%} of the view. Only it changes (instruction editors)."
     if hard.mean() < area.MIN_COVER:
         note = "The area is too small; paint a larger part of the view."
     return area.to_png(hard), note
@@ -1818,9 +1819,10 @@ def on_area_change(value, area_on):
 
 def on_make_future(
     camera_json, scene_id, starter_label, prompt, object_query, seed, speed, vp_id, parent_id,
-    number, area_png=None, area_on=None,
+    number, area_png=None, area_on=None, try_keys=None,
 ):  # fmt: skip
-    """Start a future. From the selected view while the viewer is at it (or from the
+    """Start a future, or one per editor ticked in "Try editors" (add-futures-editors;
+    none ticked: the scene's editor). From the selected view while the viewer is at it (or from the
     parent future's view when building on one); otherwise the current view is saved as
     a new viewpoint first, in the same GPU job.
 
@@ -1850,33 +1852,67 @@ def on_make_future(
             "saved view (or 'Start from this') again and redraw the area, or clear it."
         )
     starter = next((s for s in setup.starters if s.label == starter_label), None)
+    drawn = hard is not None and bool(hard.any())
+    limited = bool(" ".join((object_query or "").split())) or drawn
     try:
         text = futures.compose_prompt(starter, prompt)
-        params = futures.future_params(
-            vp, viewpoints.view_prefix(scene_id, vp.id), starter, prompt, parent, setup.editor,
-            speed, object_query, area_mask=hard, texts=setup.instructions,
-        )  # fmt: skip
+        editors, skipped = (futures.try_editors(try_keys, limited) if try_keys
+                            else ([setup.editor], []))  # fmt: skip
+        all_params = [
+            futures.future_params(
+                vp,
+                viewpoints.view_prefix(scene_id, vp.id),
+                starter,
+                prompt,
+                parent,
+                key,
+                speed,
+                object_query,
+                area_mask=hard,
+                texts=setup.instructions,
+            )  # fmt: skip
+            for key in editors
+        ]
     except futures.FutureError as e:
         raise gr.Error(str(e)) from e
-    job = PREVIEWS.create_preview(
-        text, _version_path(scene_id, vp.version), vp.camera, seed=int(seed or 0), future=params,
-        input_path=f"previews/{parent.job_id}/preview.png" if parent else None,
-        area_png=area_png if params.get("area") else None,
-    )  # fmt: skip
+    jobs = [
+        PREVIEWS.create_preview(
+            text,
+            _version_path(scene_id, vp.version),
+            vp.camera,
+            seed=int(seed or 0),
+            future=params,
+            input_path=f"previews/{parent.job_id}/preview.png" if parent else None,
+            area_png=area_png if params.get("area") else None,
+        )  # fmt: skip
+        for params in all_params
+    ]
+    if skipped:
+        note += f" Skipped {', '.join(skipped)}: they cannot limit changes to an object or area."
     strip, ids = _strip(scene_id)
     items, keys, label = _gallery(scene_id, vp.id)
     gallery = gr.update(value=items, label=label)
-    if job.status == "failed":
-        err = job.error or {}
-        return [f"❌ **Could not start.** {err.get('message', '')}{note}", None, vp.id,
+    started = [j for j in jobs if j.status != "failed"]
+    failed = "".join(f" {(j.error or {}).get('message', '')}" for j in jobs if j.status == "failed")
+    if not started:
+        return [f"❌ **Could not start.**{failed}{note}", None, vp.id,
                 parent_id, gr.skip(), strip, ids, vp.name, gallery, keys,
                 gr.Timer(active=False)]  # fmt: skip
-    RUNNING[job.job_id] = job
+    for job in started:
+        RUNNING[job.job_id] = job
     built = f" on future `{parent.job_id}`" if parent else ""
+    if failed:
+        note += f" Some editors could not start:{failed}"
+    if len(started) == 1:
+        job = started[0]
+        msg = f"⏳ Making a future of **{vp.name}**{built}: *{job.summary}* (job {job.job_id})."
+    else:
+        names = ", ".join(futures.editor_tag(j) for j in started)
+        msg = (f"⏳ Making {len(started)} futures of **{vp.name}**{built} with {names}, same "
+               "seed. Editors that were not warm start cold (1 to 3 min).")  # fmt: skip
     return [
-        f"⏳ Making a future of **{vp.name}**{built}: *{job.summary}* (job {job.job_id}).{note}",
-        job.job_id, vp.id, None, "", strip, ids, vp.name, gallery, keys,
-        gr.Timer(active=True),
+        msg + note, ",".join(j.job_id for j in started), vp.id, None, "", strip, ids, vp.name,
+        gallery, keys, gr.Timer(active=True),
     ]  # fmt: skip
 
 
@@ -1977,47 +2013,51 @@ def on_futures_tick(job_id, pending, scene_id, vp_id):
                 if pending["vp"] == vp_id:
                     items, keys, label = _gallery(scene_id, vp_id)
                     out[6], out[7] = gr.update(value=items, label=label), keys
-    if job_id:
-        job = _future_job(job_id)
+    waiting, lines = [], []
+    for one in [j for j in (job_id or "").split(",") if j]:  # several with "Try editors"
+        job = _future_job(one)
         if job is None:
-            out[0], out[1], running = "The future's job was not found.", None, False
+            lines.append(f"The future's job `{one}` was not found.")
+            continue
+        job = PREVIEWS.refresh(job, save=False)
+        RUNNING[job.job_id] = job
+        tag = futures.editor_tag(job)
+        if job.status == "failed":
+            RUNNING.pop(job.job_id, None)
+            _save_in_background(job)
+            err = job.error or {}
+            gr.Warning(f"The {tag} future failed. {err.get('message', '')}")
+            lines.append(f"❌ **{tag}: the future failed.** {err.get('message', '')} "
+                         f"{err.get('tip', '')} Click **Make future** to try again.")  # fmt: skip
+        elif job.status == "done":
+            RUNNING.pop(job.job_id, None)
+            FUTURES.put(job)
+            image = _future_image(job)  # the returned JPEG: no Hub round trip
+            _save_in_background(job)
+            took = format_elapsed(job.elapsed(PREVIEWS.clock()))
+            setup = _setup(scene_id) if scene_id else viewpoints.Setup()
+            vp = setup.get(job.params.get("viewpoint"))
+            lines.append(f"✅ {tag}: future ready {took} after the click.")
+            out[3] = str(image) if image else None  # the last one finished is shown
+            out[4] = futures.details_markdown(job, vp.name if vp else None)
+            out[5] = gr.update(interactive=True)
+            out[10] = job.job_id  # "Start from this" builds on the image just shown
+            out[11] = _changed_area(job, image)
+            out[12] = _detections_image(job)
+            if scene_id and vp:
+                items, keys, label = _gallery(scene_id, vp.id)
+                out[6], out[7] = gr.update(value=items, label=label), keys
+                out[8] = _strip(scene_id)[0]  # a new view's render now exists
         else:
-            job = PREVIEWS.refresh(job, save=False)
-            RUNNING[job.job_id] = job
-            if job.status in ("done", "failed"):
-                running = False
-            if job.status == "failed":
-                RUNNING.pop(job.job_id, None)
-                _save_in_background(job)
-                err = job.error or {}
-                gr.Warning(f"The future failed. {err.get('message', '')}")
-                out[0] = (f"❌ **The future failed.** {err.get('message', '')} "
-                          f"{err.get('tip', '')} Click **Make future** to try again.")  # fmt: skip
-                out[1] = None
-            elif job.status == "done":
-                RUNNING.pop(job.job_id, None)
-                FUTURES.put(job)
-                image = _future_image(job)  # the returned JPEG: no Hub round trip
-                _save_in_background(job)
-                took = format_elapsed(job.elapsed(PREVIEWS.clock()))
-                setup = _setup(scene_id) if scene_id else viewpoints.Setup()
-                vp = setup.get(job.params.get("viewpoint"))
-                out[0] = f"✅ Future ready {took} after the click."
-                out[1] = None
-                out[3] = str(image) if image else None
-                out[4] = futures.details_markdown(job, vp.name if vp else None)
-                out[5] = gr.update(interactive=True)
-                out[10] = job.job_id  # "Start from this" builds on the image just shown
-                out[11] = _changed_area(job, image)
-                out[12] = _detections_image(job)
-                if scene_id and vp:
-                    items, keys, label = _gallery(scene_id, vp.id)
-                    out[6], out[7] = gr.update(value=items, label=label), keys
-                    out[8] = _strip(scene_id)[0]  # a new view's render now exists
-            else:
-                label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
-                elapsed = format_elapsed(job.elapsed(PREVIEWS.clock()))
-                out[0] = f"{label}: **{job.summary}** ({elapsed})"
+            waiting.append(job.job_id)
+            label = "⏳ Waiting for a GPU" if job.status == "queued" else "⚙️ Restyling"
+            elapsed = format_elapsed(job.elapsed(PREVIEWS.clock()))
+            lines.append(f"{label} ({tag}): **{job.summary}** ({elapsed})")
+    if job_id:
+        running = bool(waiting)
+        remaining = ",".join(waiting) or None
+        out[1] = gr.skip() if remaining == job_id else remaining  # unchanged: no log refresh
+        out[0] = "  \n".join(lines)
     out[9] = gr.Timer(active=running or view_pending)
     return out
 
@@ -2142,6 +2182,8 @@ def on_compare(scene_id, vp_id, picked):
     for k in picked[-2:]:
         image, details = _tile_image(scene_id, vp_id, k)
         job = _future_job(k) if k != "render" else None
+        if job is not None:  # add-futures-editors: say which editor made it first
+            details = f"**{futures.editor_tag(job)}**  \n{details}"
         out += [str(image) if image else None, details, _detections_image(job)]
     return out
 
@@ -2506,7 +2548,8 @@ def build() -> gr.Blocks:
                                         label="Object to change (optional)", max_lines=1,
                                         max_length=masking.MAX_QUERY, placeholder="chairs",
                                         info="Only that object changes; the rest of the view "
-                                        "stays exactly as it is. FLUX.1 Kontext editor only.",
+                                        "stays exactly as it is. Instruction editors "
+                                        f"only ({futures.instruct_names()}).",
                                         scale=3,
                                     )  # fmt: skip
                                     fu_detect = gr.Button(
@@ -2542,6 +2585,13 @@ def build() -> gr.Blocks:
                                         info="Fast: fewer steps, about a third quicker.",
                                     )  # fmt: skip
                                     fu_make = gr.Button("Make future", variant="primary")
+                                fu_try = gr.CheckboxGroup(
+                                    [(e.tag, k) for k, e in models.EDITORS.items()],
+                                    label="Try editors (optional)",
+                                    info="Tick several to make one future with each, same "
+                                    "seed, in parallel. None ticked: the scene's editor "
+                                    "(Settings). Editors not warmed up start cold.",
+                                )  # fmt: skip
                                 fu_sent = gr.Markdown()
                                 fu_status = gr.Markdown()
                                 fu_result = gr.Image(
@@ -2597,9 +2647,10 @@ def build() -> gr.Blocks:
                                     fu_editor = gr.Dropdown(
                                         [(e.name, k) for k, e in models.EDITORS.items()],
                                         value=models.DEFAULT_EDITOR, label="Editor",
-                                        info="SDXL restyles the whole view. Kontext follows "
-                                        'instructions ("remove the chairs", "make the chairs '
-                                        'red") and keeps the rest; slower, larger GPU.',
+                                        info="SDXL editors restyle the whole view. "
+                                        "Instruction editors (Kontext, Qwen, klein, Step1X) "
+                                        'follow instructions ("remove the chairs", "make the '
+                                        'chairs red") and keep the rest; larger GPUs.',
                                     )  # fmt: skip
                                     gr.Markdown(
                                         "**Editor instructions.** Fixed text the Space adds "
@@ -2855,7 +2906,7 @@ def build() -> gr.Blocks:
             fu_make, "⏳ Starting…", on_make_future,
             # States go last: GET_CAMERA_JS only replaces the first input.
             [camera_json, picker, fu_starter, fu_prompt, fu_object, fu_seed, fu_speed, fu_vp,
-             fu_parent, version, fu_area_png, fu_area_on],
+             fu_parent, version, fu_area_png, fu_area_on, fu_try],
             [fu_status, fu_job, fu_vp, fu_parent, fu_parent_note, fu_strip, fu_vp_ids, fu_name,
              fu_gallery, fu_keys, fu_timer],
             js=GET_CAMERA_JS,

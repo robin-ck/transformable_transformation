@@ -94,8 +94,9 @@ def future_params(
         raise FutureError(str(e)) from e
     if named and not spec.can_mask:
         raise FutureError(
-            f"Only the FLUX.1 Kontext editor can limit changes to an object; this scene uses "
-            f"{spec.name}. Leave 'Object to change' empty, or pick Kontext under Settings."
+            f"Only instruction editors ({instruct_names()}) can limit changes to an object; "
+            f"this scene uses {spec.name}. Leave 'Object to change' empty, or pick one of "
+            "them under Settings."
         )
     extra = {"object_query": " ".join(object_query.split())} if named else {}
     if area_mask is not None and np.asarray(area_mask).any():
@@ -105,8 +106,9 @@ def future_params(
             )
         if not spec.can_mask:
             raise FutureError(
-                f"Only the FLUX.1 Kontext editor can limit changes to a drawn area; this "
-                f"scene uses {spec.name}. Clear the drawing, or pick Kontext under Settings."
+                f"Only instruction editors ({instruct_names()}) can limit changes to a drawn "
+                f"area; this scene uses {spec.name}. Clear the drawing, or pick one of them "
+                "under Settings."
             )
         try:
             extra["area"] = area.summary(area_mask)
@@ -154,7 +156,44 @@ def sent_preview(
     lines = [f"**Sent to {spec.name}:** {sent}"]
     if spec.key == "sdxl-depth":
         lines.append(f"**Negative prompt:** {texts['negative'] or '(none)'}")
+    elif spec.key == "sdxl-union":
+        lines.append("**Negative prompt:** not used (Lightning runs without guidance)")
+    elif spec.key == "step1x-edit":
+        lines.append("Step1X rewrites this prompt first; the future's details show both.")
     return "  \n".join(lines)
+
+
+def instruct_names() -> str:
+    """Short names of the instruction editors, for messages: "Kontext, Qwen, ..."."""
+    return ", ".join(s.tag for s in models.EDITORS.values() if s.instruct)
+
+
+def editor_tag(job: Job) -> str:
+    """Short editor name of a future, for gallery tiles and Compare (add-futures-editors).
+    Unknown keys (an editor removed later) show the stored key."""
+    key = job.params.get("editor") or models.DEFAULT_EDITOR
+    return models.EDITORS[key].tag if key in models.EDITORS else key
+
+
+def try_editors(keys: list[str] | None, limited: bool) -> tuple[list[str], list[str]]:
+    """ "Try editors" (add-futures-editors): the editor keys to start, in registry order
+    without duplicates, and the names of those skipped because an object or area is
+    given (`limited`) and they cannot mask. Unknown keys raise FutureError."""
+    chosen = list(dict.fromkeys(keys or []))
+    unknown = [k for k in chosen if k not in models.EDITORS]
+    if unknown:
+        raise FutureError(f"Unknown editor {unknown[0]!r}; refresh the page.")
+    if not chosen:
+        raise FutureError("Tick at least one editor to try.")
+    run = [k for k in models.EDITORS if k in chosen]
+    skipped = [models.EDITORS[k].tag for k in run if limited and not models.EDITORS[k].can_mask]
+    run = [k for k in run if not (limited and not models.EDITORS[k].can_mask)]
+    if not run:
+        raise FutureError(
+            f"None of the ticked editors can limit changes to an object or area; tick one "
+            f"of {instruct_names()}, or clear 'Object to change' and the drawing."
+        )
+    return run, skipped
 
 
 def detect_query(editor: str | None, object_query: str | None) -> str:
@@ -169,8 +208,8 @@ def detect_query(editor: str | None, object_query: str | None) -> str:
         raise FutureError("Type the object to look for in 'Object to change' first.")
     if not spec.can_mask:
         raise FutureError(
-            f"Only the FLUX.1 Kontext editor can detect objects; this scene uses {spec.name}. "
-            "Pick Kontext under Settings."
+            f"Only instruction editors ({instruct_names()}) can detect objects; this scene "
+            f"uses {spec.name}. Pick one of them under Settings."
         )
     return " ".join(object_query.split())
 
@@ -259,6 +298,8 @@ def details_markdown(job: Job, vp_name: str | None = None) -> str:
     sent = job.run.get("editor_prompt")
     if sent and sent != job.run.get("prompt"):
         lines.append(f"**Sent to the editor:** {sent}")
+    if job.run.get("editor_prompt_rewritten"):  # Step1X-Edit (add-futures-editors)
+        lines.append(f"**Rewritten by the editor:** {job.run['editor_prompt_rewritten']}")
     if job.run.get("negative_prompt"):
         lines.append(f"**Negative prompt:** {job.run['negative_prompt']}")
     model = job.run.get("model") or p.get("model")

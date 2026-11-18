@@ -186,7 +186,7 @@ def test_object_to_change_goes_to_kontext_and_shows_in_details(tmp_path: Path) -
     plain = futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query=" ")
     assert "object_query" not in plain
     # SDXL cannot mask; over-long queries are refused.
-    with pytest.raises(futures.FutureError, match="Only the FLUX.1 Kontext editor"):
+    with pytest.raises(futures.FutureError, match="Only instruction editors"):
         futures.future_params(vp, prefix, None, "x", None, "sdxl-depth", object_query="chairs")
     with pytest.raises(futures.FutureError, match="limit"):
         futures.future_params(vp, prefix, None, "x", None, "flux-kontext", object_query="x" * 61)
@@ -274,5 +274,37 @@ def test_detect_query_needs_an_object_and_a_masking_editor() -> None:
     assert futures.detect_query("flux-kontext", "  chairs,  table ") == "chairs, table"
     with pytest.raises(futures.FutureError, match="Type the object"):
         futures.detect_query("flux-kontext", " ")
-    with pytest.raises(futures.FutureError, match="Only the FLUX.1 Kontext editor"):
+    with pytest.raises(futures.FutureError, match="Only instruction editors"):
         futures.detect_query("sdxl-depth", "chairs")
+
+
+def test_try_editors_skips_restyle_editors_when_limited() -> None:
+    # add-futures-editors
+    run, skipped = futures.try_editors(["step1x-edit", "sdxl-depth", "qwen-edit"], False)
+    assert run == ["sdxl-depth", "qwen-edit", "step1x-edit"] and skipped == []
+    run, skipped = futures.try_editors(
+        ["sdxl-union", "flux2-klein", "sdxl-depth", "flux2-klein"], True
+    )
+    assert run == ["flux2-klein"] and skipped == ["SDXL depth", "SDXL union"]
+    with pytest.raises(futures.FutureError, match="None of the ticked editors"):
+        futures.try_editors(["sdxl-depth"], True)
+    with pytest.raises(futures.FutureError, match="Tick at least one"):
+        futures.try_editors([], False)
+    with pytest.raises(futures.FutureError, match="Unknown editor"):
+        futures.try_editors(["hidream"], False)
+
+
+def test_editor_tag_and_rewritten_prompt_in_details() -> None:
+    from splat_studio.space.jobs import Job
+
+    job = Job("j1", "preview", "x", 0.0)
+    job.params = {"viewpoint": "v", "editor": "qwen-edit", "own_prompt": "x"}
+    assert futures.editor_tag(job) == "Qwen"
+    job.params["editor"] = "gone-editor"
+    assert futures.editor_tag(job) == "gone-editor"
+    del job.params["editor"]
+    assert futures.editor_tag(job) == "SDXL depth"  # futures from before editors existed
+    job.run = {"editor_prompt_rewritten": "Replace the bench with grass."}
+    assert "**Rewritten by the editor:** Replace the bench" in futures.details_markdown(job)
+    assert "Kontext, Qwen, klein, Step1X" == futures.instruct_names()
+    assert "not used" in futures.sent_preview(None, "in 2050", "sdxl-union")

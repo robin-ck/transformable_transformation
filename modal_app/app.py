@@ -35,24 +35,43 @@ CPU_CORES = 4.0
 # fails at the first render ("Failed to set maximum shared memory size"). Extensions
 # without isolation see the torch installed above. Modal's add_python interpreter was
 # built with clang, so extensions would look for clang++; point them at the image's gcc.
-gsplat_image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0", "build-essential")
-    .pip_install("torch==2.4.1", "torchvision==0.19.1", "numpy<2", "huggingface_hub>=0.25")
-    .pip_install("setuptools", "wheel", "ninja", "jaxtyping", "rich>=12")
-    .env({"TORCH_CUDA_ARCH_LIST": "8.0;8.6;8.9;9.0", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"})
-    .run_commands(
-        f"git clone --depth 1 --recursive --shallow-submodules --branch v{GSPLAT_VERSION} "
-        f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
-        # The examples' requirements (fused-ssim etc.) do not list gsplat itself; installing
-        # them first means nothing can replace the source build below.
-        f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
-        f"pip install --no-build-isolation --no-deps {GSPLAT_DIR}",
-        # Fail the build, not a job, if the compiled kernels are missing.
-        'python -c "import torch, gsplat; from gsplat import csrc; '
-        f"assert gsplat.__version__ == '{GSPLAT_VERSION}', gsplat.__version__\"",
+
+
+def _gsplat_image(torch_version: str, torchvision_version: str) -> modal.Image:
+    """The CUDA image with gsplat built from source against this torch (see above)."""
+    return (
+        modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
+        .apt_install("git", "ffmpeg", "colmap", "libgl1", "libglib2.0-0", "build-essential")
+        .pip_install(
+            f"torch=={torch_version}",
+            f"torchvision=={torchvision_version}",
+            "numpy<2",
+            "huggingface_hub>=0.25",
+        )  # fmt: skip
+        .pip_install("setuptools", "wheel", "ninja", "jaxtyping", "rich>=12")
+        .env(
+            {"TORCH_CUDA_ARCH_LIST": "8.0;8.6;8.9;9.0", "CC": "gcc", "CXX": "g++", "MAX_JOBS": "4"}
+        )  # fmt: skip
+        .run_commands(
+            f"git clone --depth 1 --recursive --shallow-submodules --branch v{GSPLAT_VERSION} "
+            f"https://github.com/nerfstudio-project/gsplat {GSPLAT_DIR}",
+            # The examples' requirements (fused-ssim etc.) do not list gsplat itself;
+            # installing them first means nothing can replace the source build below.
+            f"pip install --no-build-isolation -r {GSPLAT_DIR}/examples/requirements.txt",
+            f"pip install --no-build-isolation --no-deps {GSPLAT_DIR}",
+            # Fail the build, not a job, if the compiled kernels are missing.
+            'python -c "import torch, gsplat; from gsplat import csrc; '
+            f"assert gsplat.__version__ == '{GSPLAT_VERSION}', gsplat.__version__\"",
+        )
     )
-)
+
+
+gsplat_image = _gsplat_image("2.4.1", "0.19.1")
+# add-futures-editors: the diffusers releases with Qwen-Image-Edit and FLUX.2 klein (and
+# the Step1X fork) register custom ops whose signatures torch 2.4 cannot read
+# ("infer_schema(func): Parameter q has unsupported type"), so those editors get gsplat
+# built against torch 2.6 (PyPI's cu124 wheels, matching the CUDA 12.4 base).
+gsplat_image_t26 = _gsplat_image("2.6.0", "0.21.0")
 image = gsplat_image.add_local_python_source("splat_studio")
 
 # Add object (task 4.2): FLUX.1-schnell makes a reference image, TRELLIS turns it into
@@ -156,6 +175,68 @@ kontext_image = (
         "accelerate==1.10.1",
         "sentencepiece",
         "protobuf",
+        "safetensors",
+        "pillow",
+    )
+    .env({"HF_HOME": f"{MODELS_DIR}/hf"})
+    .add_local_python_source("splat_studio")
+)
+
+# More futures editors (add-futures-editors). Each has its own image so the pins above
+# stay as they are; all start from gsplat_image, since the render runs in the same
+# container. diffusers 0.39.0 is the newest release with QwenImageEditPlusPipeline and
+# Flux2KleinPipeline that still accepts huggingface_hub < 1 (transformers 4.x needs it);
+# accelerate 1.10.1 still accepts older torch. They run on gsplat_image_t26 (torch 2.6).
+EDITORS_DIFFUSERS = [
+    "diffusers==0.39.0",
+    "transformers==4.57.3",
+    "accelerate==1.10.1",
+    "peft==0.17.1",
+    "sentencepiece",
+    "protobuf",
+    "safetensors",
+    "pillow",
+]
+# Qwen-Image-Edit-2511: 20 B transformer + 7 B Qwen2.5-VL encoder in bf16, about 57 GB.
+QWEN_GPUS = ["A100-80GB", "H100"]
+# FLUX.2 klein 4B: about 13 GB; Step1X-Edit v1.2: about 30 GB.
+KLEIN_GPUS = ["L4", "A10G", "L40S"]
+STEP1X_GPUS = ["L40S", "A100-80GB", "H100"]
+# SDXL + union ControlNet + Lightning LoRAs: like the default editor, about 11 GB.
+UNION_GPUS = PREVIEW_GPUS
+
+editors_image = (
+    gsplat_image_t26.pip_install(*EDITORS_DIFFUSERS)
+    .env({"HF_HOME": f"{MODELS_DIR}/hf"})
+    .add_local_python_source("splat_studio")
+)
+# Step1X-Edit v1.2 is not in a diffusers release yet: the authors' fork, branch
+# step1xedit_v1p2, pinned to its 2026-01-13 head. transformers 4.55.0 as its card asks.
+STEP1X_DIFFUSERS = (
+    "git+https://github.com/Peyton-Chen/diffusers@f5f1c98fa00cb4d0479af1b1b1c17d724345963a"
+)
+step1x_image = (
+    gsplat_image_t26.pip_install(  # git is in the gsplat image already
+        STEP1X_DIFFUSERS,
+        "transformers==4.55.0",
+        "accelerate==1.10.1",
+        "megfile",  # imported by the fork's Step1X pipeline
+        "qwen-vl-utils",  # likewise
+        "sentencepiece",
+        "protobuf",
+        "safetensors",
+        "pillow",
+    )
+    .env({"HF_HOME": f"{MODELS_DIR}/hf"})
+    .add_local_python_source("splat_studio")
+)
+sdxl_union_image = (
+    gsplat_image.pip_install(
+        "diffusers==0.35.1",
+        "transformers==4.53.3",
+        "accelerate==1.10.1",
+        "peft==0.17.1",
+        "opencv-python-headless==4.10.0.84",
         "safetensors",
         "pillow",
     )
@@ -1221,6 +1302,9 @@ class _ViewRestyler:
                 "object_query": object_query,
                 "mask": mask_meta,
                 "area": area_meta,
+                # What the editor returned besides the image (add-futures-editors), e.g.
+                # Step1X's rewritten prompt as "editor_prompt_rewritten".
+                **(getattr(self.editor, "last_info", None) or {}),
             }
             jpeg = _jpeg(styled)
             started.join()
@@ -1289,3 +1373,105 @@ class KontextRenderer(_ViewRestyler):
 
     EDITOR = "flux-kontext"
     GPUS = KONTEXT_GPUS
+
+
+def _restyler_cls(image, gpus):
+    """`app.cls` options of a futures editor class (add-futures-editors)."""
+    return app.cls(
+        image=image,
+        gpu=gpus,
+        timeout=PREVIEW_TIMEOUT_S,
+        secrets=[hf_secret],
+        volumes={MODELS_DIR: models_volume},
+        retries=0,
+        scaledown_window=WARM_S,
+        max_containers=1,
+    )
+
+
+@_restyler_cls(sdxl_union_image, UNION_GPUS)
+class SdxlUnionRenderer(_ViewRestyler):
+    """Futures with SDXL + union ControlNet (depth + edges) and the Lightning LoRAs.
+    Test:  modal run modal_app/app.py::SdxlUnionRenderer.warm"""
+
+    EDITOR = "sdxl-union"
+    GPUS = UNION_GPUS
+
+
+@_restyler_cls(editors_image, QWEN_GPUS)
+class QwenEditRenderer(_ViewRestyler):
+    """Futures with Qwen-Image-Edit-2511 and its Lightning LoRAs (instruction edits).
+    Test:  modal run modal_app/app.py::QwenEditRenderer.warm"""
+
+    EDITOR = "qwen-edit"
+    GPUS = QWEN_GPUS
+
+
+@_restyler_cls(editors_image, KLEIN_GPUS)
+class Flux2KleinRenderer(_ViewRestyler):
+    """Futures with FLUX.2 klein 4B (fast instruction edits).
+    Test:  modal run modal_app/app.py::Flux2KleinRenderer.warm"""
+
+    EDITOR = "flux2-klein"
+    GPUS = KLEIN_GPUS
+
+
+@_restyler_cls(step1x_image, STEP1X_GPUS)
+class Step1XRenderer(_ViewRestyler):
+    """Futures with Step1X-Edit v1.2 (thinking on, reflection off).
+    Test:  modal run modal_app/app.py::Step1XRenderer.warm"""
+
+    EDITOR = "step1x-edit"
+    GPUS = STEP1X_GPUS
+
+
+def _check_editor_imports(key: str) -> dict:
+    """Import torch, gsplat and the editor's diffusers pipeline class, without a GPU or
+    weights (add-futures-editors, task 2.1). Loading on a GPU is `<Class>.warm`."""
+    import importlib
+
+    import torch
+
+    out = {"editor": key, "torch": str(torch.__version__)}
+    for mod in ("diffusers", "transformers", "huggingface_hub", "gsplat"):
+        try:
+            out[mod] = str(importlib.import_module(mod).__version__)
+        except Exception as e:
+            out[mod] = f"{type(e).__name__}: {str(e)[:200]}"
+    pipelines = {
+        "sdxl-union": ("ControlNetUnionModel", "StableDiffusionXLControlNetUnionImg2ImgPipeline"),
+        "qwen-edit": ("QwenImageEditPlusPipeline", "FlowMatchEulerDiscreteScheduler"),
+        "flux2-klein": ("Flux2KleinPipeline",),
+        "step1x-edit": ("Step1XEditPipelineV1P2",),
+    }
+    import diffusers
+
+    for name in pipelines[key]:
+        try:
+            getattr(diffusers, name)  # lazy import: this loads the module
+            out[name] = "ok"
+        except Exception as e:
+            out[name] = f"{type(e).__name__}: {str(e)[:300]}"
+    try:
+        import peft
+
+        out["peft"] = peft.__version__
+    except ImportError:
+        out["peft"] = None
+    print(json.dumps(out))
+    return out
+
+
+@app.function(image=sdxl_union_image, timeout=300)
+def check_union_image() -> dict:
+    return _check_editor_imports("sdxl-union")
+
+
+@app.function(image=editors_image, timeout=300)
+def check_editors_image() -> dict:
+    return {k: _check_editor_imports(k) for k in ("qwen-edit", "flux2-klein")}
+
+
+@app.function(image=step1x_image, timeout=300)
+def check_step1x_image() -> dict:
+    return _check_editor_imports("step1x-edit")

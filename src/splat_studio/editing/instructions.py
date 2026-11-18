@@ -2,9 +2,9 @@
 
 Before the editor model runs, a future's prompt can get fixed text added to it:
   negative        SDXL only: what the image should not look like (its negative prompt)
-  object_change   Kontext with "Object to change": added after the prompt
+  object_change   instruction editors with "Object to change": added after the prompt
   object_removal  the same, when the prompt removes something ("remove the chairs")
-  area_change     Kontext with a drawn "Area to change": added after the prompt
+  area_change     instruction editors with a drawn "Area to change": added after the prompt
   area_removal    the same, when the prompt removes something
   removal_words   words that make a prompt a removal (comma separated, whole words)
   pronouns        words replaced by the named object ("make it green" -> "make the
@@ -47,20 +47,22 @@ LABELS: dict[str, tuple[str, str]] = {
     "negative": ("Negative prompt (SDXL)", "What the image should not look like."),
     "object_change": (
         "Object to change: added after your prompt",
-        "Kontext, when an object is named. {target} is the named object.",
+        "Instruction editors, when an object is named. {target} is the named object.",
     ),
     "object_removal": (
         "Object to remove: added after your prompt",
-        'Kontext, when an object is named and the prompt removes it ("remove", "delete"…). '
+        "Instruction editors, when an object is named and the prompt removes it "
+        '("remove", "delete"…). '
         "{target} is the named object.",
     ),
     "area_change": (
         "Drawn area: added after your prompt",
-        "Kontext, when an area is painted.",
+        "Instruction editors, when an area is painted.",
     ),
     "area_removal": (
         "Drawn area, removal: added after your prompt",
-        'Kontext, when an area is painted and the prompt removes something ("remove"…).',
+        "Instruction editors, when an area is painted and the prompt removes "
+        'something ("remove"…).',
     ),
     "removal_words": (
         "Removal words (comma separated)",
