@@ -36,8 +36,8 @@ def test_valid_video(tmp_path: Path) -> None:
 
 
 def test_video_too_long(tmp_path: Path) -> None:
-    with pytest.raises(UploadError, match="limit is 120 s"):
-        validate_upload(_files(tmp_path, 1, ".mov"), probe=_probe(121))
+    with pytest.raises(UploadError, match="limit is 300 s"):
+        validate_upload(_files(tmp_path, 1, ".mov"), probe=_probe(301))
 
 
 def test_video_too_big(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

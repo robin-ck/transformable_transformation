@@ -9,12 +9,12 @@ from pathlib import Path
 from splat_studio.reconstruction import frames
 from splat_studio.reconstruction.pipeline import PHOTO_EXT, VIDEO_EXT
 
-MAX_VIDEO_SECONDS = 120
-MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # a 2-min 4K phone clip is ~700-900 MB
+MAX_VIDEO_SECONDS = 300
+MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # a 5-min 4K phone clip is ~1.75-2.25 GB; 1080p is far smaller
 MIN_PHOTOS = 20
 MAX_PHOTOS = 300
 
-HELP = "Upload one video (MP4/MOV, up to 2 minutes and 1 GB) or 20 to 300 photos (JPG/PNG)."
+HELP = "Upload one video (MP4/MOV, up to 5 minutes and 2 GB) or 20 to 300 photos (JPG/PNG)."
 
 
 class UploadError(ValueError):
@@ -70,7 +70,7 @@ def validate_upload(
         if duration > MAX_VIDEO_SECONDS:
             raise UploadError(
                 f"The video is {duration:.0f} s long; the limit is {MAX_VIDEO_SECONDS} s "
-                "(2 minutes). Trim it and upload again."
+                "(5 minutes). Trim it and upload again."
             )
         return ValidUpload("video", [video], f"Video {video.name}: {duration:.0f} s, {_mb(size)}.")
 
